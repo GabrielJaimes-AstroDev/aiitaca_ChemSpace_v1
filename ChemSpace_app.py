@@ -7,6 +7,8 @@ from plotly.subplots import make_subplots
 import json
 import pickle
 import re
+import tempfile
+import os
 
 # Page configuration
 st.set_page_config(
@@ -48,28 +50,36 @@ st.markdown("""
 
 def load_data(file_path):
     """Load data from JSON or pickle file"""
-    if file_path.endswith('.json'):
-        with open(file_path, 'r') as f:
-            return json.load(f)
-    elif file_path.endswith('.pkl'):
-        with open(file_path, 'rb') as f:
-            return pickle.load(f)
+    try:
+        if file_path.endswith('.json'):
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        elif file_path.endswith('.pkl'):
+            with open(file_path, 'rb') as f:
+                return pickle.load(f)
+    except Exception as e:
+        st.error(f"Error loading file: {str(e)}")
+        return None
     return None
 
 def reformat_chemical_formula(formula):
     """Format chemical formula with subscripts"""
     try:
-        if not formula or pd.isna(formula) or formula.lower() == 'nan':
+        if not formula or pd.isna(formula) or str(formula).lower() == 'nan':
             return ""
         formula = str(formula).strip()
         formula = re.sub(r'(\d+)', r'<sub>\1</sub>', formula)
         formula = re.sub(r'([+-]\d*)', r'<sup>\1</sup>', formula)
         return formula
     except:
-        return formula
+        return str(formula) if formula else ""
 
 def create_interactive_plot(data):
     """Create interactive Plotly visualization"""
+    if not data or 'molecules' not in data:
+        st.error("No molecule data available")
+        return go.Figure()
+    
     molecules_df = pd.DataFrame(data['molecules'])
     
     # Create figure
@@ -83,6 +93,16 @@ def create_interactive_plot(data):
         db_data = molecules_df[molecules_df['database'] == db]
         color = colors.get(db, '#cccccc')
         
+        # Custom hover text
+        hover_text = []
+        for _, row in db_data.iterrows():
+            hover_text.append(
+                f"<b>Name:</b> {row.get('name', 'N/A')}<br>"
+                f"<b>Formula:</b> {reformat_chemical_formula(row.get('formula', ''))}<br>"
+                f"<b>Database:</b> {row.get('database', 'N/A')}<br>"
+                f"<b>Detected:</b> {row.get('detected', 'N/A')}"
+            )
+        
         fig.add_trace(go.Scatter(
             x=db_data['x'],
             y=db_data['y'],
@@ -94,14 +114,9 @@ def create_interactive_plot(data):
                 opacity=0.7 if db != 'PubChem' else 0.3,
                 line=dict(width=0.5, color='black')
             ),
-            text=db_data.apply(lambda row: f"""
-                <b>Name:</b> {row['name']}<br>
-                <b>Formula:</b> {reformat_chemical_formula(row['formula'])}<br>
-                <b>Database:</b> {row['database']}<br>
-                <b>Detected:</b> {row.get('detected', 'N/A')}
-            """, axis=1),
+            text=hover_text,
             hoverinfo='text',
-            customdata=db_data[['name', 'formula', 'database', 'detected']]
+            customdata=db_data[['name', 'formula', 'database', 'detected']].values
         ))
     
     # Add GUAPOS molecules with special styling
@@ -126,7 +141,7 @@ def create_interactive_plot(data):
                 textposition='top center',
                 textfont=dict(size=10, color='black'),
                 hoverinfo='text',
-                customdata=detected_data[['name', 'formula', 'database', 'detected']]
+                customdata=detected_data[['name', 'formula', 'database', 'detected']].values
             ))
         
         if not not_detected_data.empty:
@@ -142,12 +157,12 @@ def create_interactive_plot(data):
                     line=dict(width=1, color='black')
                 ),
                 hoverinfo='text',
-                customdata=not_detected_data[['name', 'formula', 'database', 'detected']]
+                customdata=not_detected_data[['name', 'formula', 'database', 'detected']].values
             ))
     
     # Update layout
     fig.update_layout(
-        title=f"Molecular Space Analysis - {data['metadata']['neighbor_database']} Neighbors",
+        title=f"Molecular Space Analysis - {data.get('metadata', {}).get('neighbor_database', 'Unknown')} Neighbors",
         xaxis_title="UMAP Dimension 1",
         yaxis_title="UMAP Dimension 2",
         showlegend=True,
@@ -157,13 +172,17 @@ def create_interactive_plot(data):
         plot_bgcolor='white'
     )
     
-    fig.update_xaxes(showgrid=False, zeroline=False)
-    fig.update_yaxes(showgrid=False, zeroline=False)
+    fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False)
     
     return fig
 
 def create_statistics_dashboard(data):
     """Create statistics dashboard"""
+    if not data or 'molecules' not in data:
+        st.error("No data available for statistics")
+        return
+    
     molecules_df = pd.DataFrame(data['molecules'])
     
     col1, col2, col3 = st.columns(3)
@@ -176,7 +195,7 @@ def create_statistics_dashboard(data):
         st.metric("GUAPOS Molecules", guapos_count)
     
     with col3:
-        neighbor_db = data['metadata']['neighbor_database']
+        neighbor_db = data.get('metadata', {}).get('neighbor_database', 'Unknown')
         neighbor_count = len(molecules_df[molecules_df['database'] == neighbor_db])
         st.metric(f"{neighbor_db} Molecules", neighbor_count)
     
@@ -214,12 +233,12 @@ def create_statistics_dashboard(data):
 
 def display_neighbors_table(data):
     """Display neighbors table"""
-    if not data.get('knn_results'):
+    if not data or not data.get('knn_results'):
         st.warning("No KNN results available")
         return
     
     knn_results = data['knn_results']
-    neighbor_db = data['metadata']['neighbor_database']
+    neighbor_db = data.get('metadata', {}).get('neighbor_database', 'Unknown')
     
     st.subheader(f"KNN Analysis Results - {neighbor_db} Neighbors")
     
@@ -232,28 +251,34 @@ def display_neighbors_table(data):
     
     # Create expandable sections for each GUAPOS molecule
     for i, result in enumerate(detected_results):
-        with st.expander(f"{result['guapos_name']} - {reformat_chemical_formula(result['guapos_formula'])}"):
+        with st.expander(f"{result.get('guapos_name', 'Unknown')} - {reformat_chemical_formula(result.get('guapos_formula', ''))}"):
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown(f"**SMILES:** `{result['guapos_smiles']}`")
+                st.markdown(f"**SMILES:** `{result.get('guapos_smiles', 'N/A')}`")
                 st.markdown(f"**Status:** Detected")
             
             with col2:
-                if result['neighbors']:
-                    st.markdown(f"**Nearest Neighbor:** {result['neighbors'][0]['name']}")
-                    st.markdown(f"**Distance:** {result['neighbors'][0]['distance']:.4f}")
+                if result.get('neighbors'):
+                    st.markdown(f"**Nearest Neighbor:** {result['neighbors'][0].get('name', 'Unknown')}")
+                    st.markdown(f"**Distance:** {result['neighbors'][0].get('distance', 0):.4f}")
             
             # Display neighbors table
-            neighbors_df = pd.DataFrame(result['neighbors'])
-            st.dataframe(
-                neighbors_df[['rank', 'name', 'formula', 'distance', 'database']],
-                use_container_width=True
-            )
+            if result.get('neighbors'):
+                neighbors_df = pd.DataFrame(result['neighbors'])
+                st.dataframe(
+                    neighbors_df[['rank', 'name', 'formula', 'distance', 'database']],
+                    use_container_width=True,
+                    height=200
+                )
 
 def main():
     # Header
     st.markdown('<h1 class="main-header">🧪 Molecular Space Analysis</h1>', unsafe_allow_html=True)
+    
+    # Initialize session state for data
+    if 'analysis_data' not in st.session_state:
+        st.session_state.analysis_data = None
     
     # Sidebar for file upload
     with st.sidebar:
@@ -264,36 +289,45 @@ def main():
             help="Upload the JSON or pickle file generated by the analysis"
         )
         
-        if uploaded_file:
-            # Save uploaded file temporarily
-            with open("temp_data.file", "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Load data
+        if uploaded_file is not None:
             try:
-                data = load_data("temp_data.file")
-                st.success("Data loaded successfully!")
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_path = tmp_file.name
                 
-                # Display metadata
-                st.subheader("Dataset Information")
-                st.write(f"**Total molecules:** {data['metadata']['total_molecules']}")
-                st.write(f"**Neighbor database:** {data['metadata']['neighbor_database']}")
-                st.write(f"**Analysis date:** {data['metadata']['timestamp']}")
+                # Load data
+                data = load_data(tmp_path)
                 
-                # Database counts
-                st.subheader("Database Counts")
-                for db, count in data['metadata']['databases_present'].items():
-                    st.write(f"{db}: {count}")
+                if data:
+                    st.session_state.analysis_data = data
+                    st.success("Data loaded successfully!")
+                    
+                    # Display metadata
+                    st.subheader("Dataset Information")
+                    st.write(f"**Total molecules:** {data.get('metadata', {}).get('total_molecules', 'N/A')}")
+                    st.write(f"**Neighbor database:** {data.get('metadata', {}).get('neighbor_database', 'N/A')}")
+                    st.write(f"**Analysis date:** {data.get('metadata', {}).get('timestamp', 'N/A')}")
+                    
+                    # Database counts
+                    if 'metadata' in data and 'databases_present' in data['metadata']:
+                        st.subheader("Database Counts")
+                        for db, count in data['metadata']['databases_present'].items():
+                            st.write(f"{db}: {count}")
+                
+                # Clean up temporary file
+                os.unlink(tmp_path)
                     
             except Exception as e:
-                st.error(f"Error loading data: {str(e)}")
-                data = None
+                st.error(f"Error processing file: {str(e)}")
+                st.session_state.analysis_data = None
         else:
-            data = None
             st.info("Please upload a analysis data file to begin")
     
     # Main content
-    if data:
+    if st.session_state.analysis_data:
+        data = st.session_state.analysis_data
+        
         # Create tabs
         tab1, tab2, tab3 = st.tabs(["Interactive Plot", "Statistics", "Neighbors Table"])
         
@@ -302,22 +336,14 @@ def main():
             fig = create_interactive_plot(data)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Additional controls
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Plot Controls")
-                show_labels = st.checkbox("Show molecule labels", value=True)
-                opacity = st.slider("Marker opacity", 0.1, 1.0, 0.7)
-            
-            with col2:
-                st.subheader("Database Filter")
-                databases = list(set([m['database'] for m in data['molecules']]))
-                selected_dbs = st.multiselect(
-                    "Select databases to show",
-                    databases,
-                    default=databases
-                )
+            # Additional information
+            st.markdown("""
+            **Interaction Guide:**
+            - **Hover** over points to see molecular details
+            - **Click and drag** to zoom in on specific areas
+            - **Double-click** to reset the view
+            - **Toggle databases** using the legend
+            """)
         
         with tab2:
             create_statistics_dashboard(data)
@@ -346,26 +372,29 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # Example of what the interface will show
+        # Example section
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Features")
+            st.subheader("Expected Data Format")
             st.markdown("""
-            - **Interactive Plot**: Zoom, pan, and hover over molecules
-            - **Color-coded databases**: Different colors for each molecular database
-            - **Detection status**: Visual distinction between detected and non-detected molecules
-            - **Detailed tooltips**: Comprehensive information on hover
+            The application expects a JSON or pickle file containing:
+            - Molecular coordinates (x, y)
+            - Database information
+            - Detection status
+            - KNN analysis results
+            - Molecular properties (name, formula, SMILES)
             """)
         
         with col2:
-            st.subheader("Supported Data")
+            st.subheader("Supported Features")
             st.markdown("""
-            - Multiple molecular databases (GUAPOS, PubChem, TMC, etc.)
-            - Detection status information
-            - KNN analysis results
-            - Molecular fingerprints and coordinates
-            - Chemical formulas and SMILES strings
+            - Multiple molecular databases
+            - Interactive visualization
+            - Statistical analysis
+            - Detailed molecular information
+            - Responsive design
+            - Cross-platform compatibility
             """)
 
 if __name__ == "__main__":
