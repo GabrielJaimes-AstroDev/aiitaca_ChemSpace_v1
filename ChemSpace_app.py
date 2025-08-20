@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
-import pickle
 import re
-import os
-from io import StringIO
 
 # Page configuration
 st.set_page_config(
@@ -46,33 +43,28 @@ st.markdown("""
         margin: 0.2rem 0;
         border-left: 3px solid #9467bd;
     }
+    .neighbor-point {
+        background-color: #ffebee;
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        margin: 0.2rem 0;
+        border-left: 3px solid #d32f2f;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-def find_plot_files():
-    """Automatically find plot data files in the current directory"""
-    plot_files = []
-    for file in os.listdir('.'):
-        if file.endswith('.json') or file.endswith('.pkl'):
-            plot_files.append(file)
-    return sorted(plot_files)
-
 def load_plot_data(file_path):
-    """Load plot data from JSON or pickle file"""
+    """Load plot data from JSON file"""
     try:
-        if file_path.endswith('.json'):
-            with open(file_path, 'r') as f:
-                return json.load(f)
-        elif file_path.endswith('.pkl'):
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
+        with open(file_path, 'r') as f:
+            return json.load(f)
     except Exception as e:
-        st.error(f"Error loading file {file_path}: {str(e)}")
-    return None
+        st.error(f"Error loading plot data: {str(e)}")
+        return None
 
 def format_chemical_formula(formula):
     """Format chemical formula with subscripts"""
-    if not formula or pd.isna(formula) or formula == 'Unknown':
+    if not formula or pd.isna(formula):
         return ""
     
     # Handle subscripts
@@ -84,168 +76,159 @@ def format_chemical_formula(formula):
     return formula
 
 def create_interactive_plot(plot_data):
-    """Create interactive Plotly visualization with consistent point sizes"""
+    """Create interactive Plotly visualization with neighbor highlighting"""
     
-    fig = go.Figure()
-    
-    # Group points by database for better organization
-    points_by_database = {}
-    for point in plot_data.get('points', []):
-        db = point.get('database', 'Unknown')
-        if db not in points_by_database:
-            points_by_database[db] = []
-        points_by_database[db].append(point)
-    
-    # Color mapping
-    color_map = plot_data.get('color_scheme', {
-        'GUAPOS': '#1f77b4',
-        'TMC_1': '#ff7f0e',
-        'All_Discoveries': '#2ca02c',
-        'KIDA': '#FFFF00',
-        'PubChem': '#9467bd'
+    # Create DataFrame from plot data
+    df_points = pd.DataFrame({
+        'x': [point[0] for point in plot_data['points']],
+        'y': [point[1] for point in plot_data['points']],
+        'label': plot_data['labels'],
+        'database': plot_data['databases'],
+        'formula': plot_data['formulas'],
+        'color': plot_data['colors'],
+        'index': range(len(plot_data['points']))
     })
     
-    # Add traces for each database with consistent point sizes
-    for db, points in points_by_database.items():
-        if not points:
-            continue
+    # Identify neighbor indices
+    neighbor_indices = set()
+    if plot_data.get('knn_connections'):
+        for connection in plot_data['knn_connections']:
+            neighbor_indices.add(connection['neighbor_index'])
+    
+    # Create the main scatter plot
+    fig = go.Figure()
+    
+    # Add points for each database (excluding neighbors which will be highlighted separately)
+    databases = df_points['database'].unique()
+    for db in databases:
+        db_mask = (df_points['database'] == db) & (~df_points['index'].isin(neighbor_indices))
+        db_data = df_points[db_mask]
+        
+        if len(db_data) > 0:
+            # Create hover text
+            hover_text = []
+            for _, row in db_data.iterrows():
+                text = f"Database: {row['database']}<br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                hover_text.append(text)
             
-        x = [p['x'] for p in points]
-        y = [p['y'] for p in points]
+            fig.add_trace(go.Scatter(
+                x=db_data['x'],
+                y=db_data['y'],
+                mode='markers',
+                marker=dict(
+                    color=db_data['color'].iloc[0],
+                    size=8 if db == 'PubChem' else 12,
+                    opacity=0.3 if db == 'PubChem' else 0.7
+                ),
+                name=db,
+                hovertext=hover_text,
+                hoverinfo='text',
+                showlegend=True
+            ))
+    
+    # Highlight neighbor points in red
+    if neighbor_indices:
+        neighbor_data = df_points[df_points['index'].isin(neighbor_indices)]
         
-        # Set consistent point sizes (smaller than before)
-        base_size = 6
-        if db == 'GUAPOS':
-            # Smaller size for GUAPOS points
-            sizes = [base_size * 1.2 for _ in points]  # Slightly larger but not huge
-        elif db == plot_data.get('neighbor_database', 'PubChem'):
-            # Smaller size for neighbor points
-            sizes = [base_size for _ in points]
-        else:
-            sizes = [base_size for _ in points]
-        
-        # Create hover text
-        hover_text = []
-        for point in points:
-            text = f"<b>{point.get('name', 'Unknown')}</b><br>"
-            if point.get('formula'):
-                text += f"Formula: {point['formula']}<br>"
-            text += f"Database: {point.get('database', 'Unknown')}<br>"
-            if point.get('detected') is not None:
-                status = "Detected" if point['detected'] else "Not Detected"
-                text += f"Status: {status}<br>"
-            if point.get('is_neighbor'):
-                text += "Type: KNN Neighbor<br>"
-            hover_text.append(text)
-        
-        # Get color from mapping or use default
-        color = color_map.get(db, '#cccccc')
-        
-        fig.add_trace(go.Scatter(
-            x=x,
-            y=y,
-            mode='markers',
-            marker=dict(
-                size=sizes,
-                color=color,
-                opacity=0.7,
-                line=dict(width=0.5, color='DarkSlateGrey')
-            ),
-            name=db,
-            text=hover_text,
-            hoverinfo='text',
-            hovertemplate="%{text}<extra></extra>"
-        ))
+        if len(neighbor_data) > 0:
+            # Create hover text for neighbors
+            neighbor_hover_text = []
+            for _, row in neighbor_data.iterrows():
+                text = f"<span style='color: red; font-weight: bold;'>NEIGHBOR CANDIDATE</span><br>"
+                text += f"Database: {row['database']}<br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                neighbor_hover_text.append(text)
+            
+            fig.add_trace(go.Scatter(
+                x=neighbor_data['x'],
+                y=neighbor_data['y'],
+                mode='markers',
+                marker=dict(
+                    color='red',
+                    size=15,
+                    opacity=0.9,
+                    line=dict(color='darkred', width=2)
+                ),
+                name='Neighbor Candidates',
+                hovertext=neighbor_hover_text,
+                hoverinfo='text',
+                showlegend=True
+            ))
     
     # Add KNN connections if they exist
-    if 'connections' in plot_data:
-        connections = plot_data['connections']
+    if plot_data.get('knn_connections'):
+        connections = plot_data['knn_connections']
         for connection in connections:
-            # Find the actual points
-            guapos_point = None
-            neighbor_point = None
+            guapos_idx = connection['guapos_index']
+            neighbor_idx = connection['neighbor_index']
             
-            for point in plot_data['points']:
-                if (point.get('database') == 'GUAPOS' and 
-                    point.get('detected') and 
-                    'index' in point and point['index'] == connection.get('guapos_index')):
-                    guapos_point = point
-                elif ('index' in point and point['index'] == connection.get('neighbor_index')):
-                    neighbor_point = point
-            
-            if guapos_point and neighbor_point:
+            if (guapos_idx < len(plot_data['points']) and 
+                neighbor_idx < len(plot_data['points'])):
+                
+                x0, y0 = plot_data['points'][guapos_idx]
+                x1, y1 = plot_data['points'][neighbor_idx]
+                
                 fig.add_trace(go.Scatter(
-                    x=[guapos_point['x'], neighbor_point['x']],
-                    y=[guapos_point['y'], neighbor_point['y']],
+                    x=[x0, x1],
+                    y=[y0, y1],
                     mode='lines',
-                    line=dict(color='gray', width=1, dash='dash'),
-                    opacity=0.6,
+                    line=dict(color='gray', width=1.5, dash='dash'),
+                    opacity=0.7,
                     showlegend=False,
-                    hoverinfo='none'
+                    hoverinfo='skip'
                 ))
     
-    # Add labels if they exist
-    if 'labels' in plot_data:
-        for label in plot_data['labels']:
-            fig.add_annotation(
-                x=label['x'],
-                y=label['y'],
-                text=label['text'],
-                showarrow=False,
-                font=dict(size=label.get('fontsize', 8), color='black'),
-                opacity=label.get('alpha', 0.8),
-                bgcolor='rgba(255,255,255,0.7)',
-                bordercolor='black',
-                borderwidth=1,
-                borderpad=2
-            )
-    
     # Update layout
-    title = plot_data.get('title', 'Chemical Space Analysis')
     fig.update_layout(
-        title=title,
-        showlegend=True,
-        legend=dict(title='Databases', itemsizing='constant'),
+        title="Chemical Space Visualization - PCA/UMAP Projection",
+        xaxis_title="Dimension 1",
+        yaxis_title="Dimension 2",
         hovermode='closest',
-        width=1000,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
         height=700,
-        plot_bgcolor='white'
+        width=1000
     )
     
-    # Remove axis labels and ticks
-    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
-    fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False)
     
     return fig
 
 def create_database_summary(plot_data):
     """Create database summary statistics"""
-    db_counts = {}
-    for point in plot_data.get('points', []):
-        db = point.get('database', 'Unknown')
-        db_counts[db] = db_counts.get(db, 0) + 1
-    
-    summary_df = pd.DataFrame({
-        'Database': list(db_counts.keys()),
-        'Count': list(db_counts.values())
-    }).sort_values('Count', ascending=False)
-    
-    # Create bar chart with consistent colors
-    color_map = plot_data.get('color_scheme', {
-        'GUAPOS': '#1f77b4',
-        'TMC_1': '#ff7f0e',
-        'All_Discoveries': '#2ca02c',
-        'KIDA': '#FFFF00',
-        'PubChem': '#9467bd'
-    })
+    databases = plot_data['databases']
+    db_counts = pd.Series(databases).value_counts().reset_index()
+    db_counts.columns = ['Database', 'Count']
     
     fig = px.bar(
-        summary_df,
+        db_counts,
         x='Database',
         y='Count',
         color='Database',
         title="Molecule Distribution by Database",
-        color_discrete_map=color_map
+        color_discrete_map={
+            'GUAPOS': '#1f77b4',
+            'TMC_1': '#ff7f0e',
+            'All_Discoveries': '#2ca02c',
+            'KIDA': '#FFFF00',
+            'PubChem': '#9467bd'
+        }
     )
     
     fig.update_layout(
@@ -254,131 +237,145 @@ def create_database_summary(plot_data):
         showlegend=False
     )
     
-    return fig, summary_df
+    return fig
 
-def create_knn_results_table(plot_data):
-    """Create a table of KNN results"""
-    if 'knn_results' not in plot_data:
+def create_neighbor_analysis_panel(plot_data):
+    """Create panel showing neighbor candidate analysis"""
+    if not plot_data.get('knn_connections'):
         return None
     
-    results = []
-    for result in plot_data['knn_results']:
-        if result.get('detected', 0) == 1:
-            for neighbor in result.get('neighbors', []):
-                results.append({
-                    'GUAPOS Molecule': result['guapos_name'],
-                    'GUAPOS Formula': result['guapos_formula'],
-                    'Neighbor Name': neighbor['name'],
-                    'Neighbor Formula': neighbor['formula'],
-                    'Neighbor Database': neighbor['database'],
-                    'Distance': f"{neighbor['distance']:.4f}",
-                    'Rank': neighbor['rank']
-                })
+    # Get unique neighbor indices
+    neighbor_indices = set()
+    for connection in plot_data['knn_connections']:
+        neighbor_indices.add(connection['neighbor_index'])
     
-    if results:
-        return pd.DataFrame(results)
-    return None
+    # Count neighbors by database
+    neighbor_dbs = {}
+    for idx in neighbor_indices:
+        if idx < len(plot_data['databases']):
+            db = plot_data['databases'][idx]
+            neighbor_dbs[db] = neighbor_dbs.get(db, 0) + 1
+    
+    return neighbor_dbs
+
+def create_molecule_info_panel(plot_data, selected_point):
+    """Create molecule information panel"""
+    if selected_point is None:
+        return None
+    
+    point_idx = selected_point['pointIndex']
+    
+    if point_idx >= len(plot_data['points']):
+        return None
+    
+    # Check if this is a neighbor candidate
+    is_neighbor = False
+    if plot_data.get('knn_connections'):
+        neighbor_indices = set()
+        for connection in plot_data['knn_connections']:
+            neighbor_indices.add(connection['neighbor_index'])
+        is_neighbor = point_idx in neighbor_indices
+    
+    info = {
+        'Database': plot_data['databases'][point_idx],
+        'Name': plot_data['labels'][point_idx] or 'Unknown',
+        'Formula': plot_data['formulas'][point_idx] or 'Unknown',
+        'Coordinates': f"({plot_data['points'][point_idx][0]:.3f}, {plot_data['points'][point_idx][1]:.3f})",
+        'Is Neighbor Candidate': is_neighbor
+    }
+    
+    return info
 
 def main():
     st.markdown('<h1 class="main-header">🧪 Chemical Space Visualization</h1>', unsafe_allow_html=True)
     
-    # Automatically find plot files
-    plot_files = find_plot_files()
-    
     # Sidebar
     with st.sidebar:
-        st.header("📊 Data Selection")
+        st.header("📊 Data Configuration")
         
-        if not plot_files:
-            st.warning("No plot data files found. Please add JSON or PKL files to the repository.")
-            return
-        
-        # File selection
-        selected_file = st.selectbox(
-            "Select plot data file:",
-            options=plot_files,
-            help="Select the plot data file to visualize"
+        # File upload
+        uploaded_file = st.file_uploader(
+            "Upload plot data JSON",
+            type=['json'],
+            help="Upload the plot_data.json file generated by the analysis script"
         )
         
-        if selected_file:
-            plot_data = load_plot_data(selected_file)
+        if uploaded_file is not None:
+            try:
+                plot_data = json.load(uploaded_file)
+                st.success("✅ Data loaded successfully!")
+            except Exception as e:
+                st.error(f"❌ Error loading file: {str(e)}")
+                plot_data = None
+        else:
+            # Try to load from default path
+            try:
+                plot_data = load_plot_data("plot_data.json")
+                if plot_data:
+                    st.info("📁 Using default plot_data.json file")
+            except:
+                plot_data = None
+                st.warning("⚠️ Please upload a plot data JSON file")
+        
+        if plot_data:
+            st.markdown("---")
+            st.header("🎨 Display Options")
             
-            if plot_data:
-                st.success(f"✅ Loaded: {selected_file}")
-                
-                st.markdown("---")
-                st.header("🎨 Display Options")
-                
-                # Database filter
-                all_dbs = list(set(point.get('database', 'Unknown') 
-                                 for point in plot_data.get('points', [])))
-                selected_dbs = st.multiselect(
-                    "Filter databases:",
-                    options=all_dbs,
-                    default=all_dbs,
-                    help="Select which databases to display"
-                )
-                
-                # Point size adjustment
-                point_size = st.slider(
-                    "Point size:",
-                    min_value=4,
-                    max_value=12,
-                    value=6,
-                    step=1,
-                    help="Adjust the size of all points"
-                )
-                
-                # Show/hide connections
-                show_connections = st.checkbox(
-                    "Show KNN connections",
-                    value=True,
-                    help="Display lines between GUAPOS molecules and their neighbors"
-                )
-                
-                st.markdown("---")
-                st.header("📊 Dataset Info")
-                
-                # Show basic stats
-                total_points = len(plot_data.get('points', []))
-                st.write(f"**Total molecules:** {total_points}")
-                
-                if 'knn_results' in plot_data:
-                    detected = sum(1 for r in plot_data['knn_results'] if r.get('detected', 0) == 1)
-                    st.write(f"**Detected GUAPOS:** {detected}")
-                
-                neighbor_db = plot_data.get('neighbor_database', 'Unknown')
-                st.write(f"**Neighbor database:** {neighbor_db}")
+            # Show database summary
+            db_counts = pd.Series(plot_data['databases']).value_counts()
+            st.write("**Database Summary:**")
+            for db, count in db_counts.items():
+                st.write(f"• {db}: {count} molecules")
+            
+            # Show neighbor analysis if available
+            neighbor_dbs = create_neighbor_analysis_panel(plot_data)
+            if neighbor_dbs:
+                st.write("**Neighbor Candidates by Database:**")
+                for db, count in neighbor_dbs.items():
+                    st.write(f"• {db}: {count} candidates")
+            
+            # Show KNN info if available
+            if plot_data.get('knn_connections'):
+                st.write(f"• KNN Connections: {len(plot_data['knn_connections'])}")
+            
+            st.markdown("---")
+            st.header("🔍 Interaction Guide")
+            st.info("""
+            - **Hover** over points to see molecule details
+            - **Red points** = Neighbor candidates
+            - **Click** on points to view detailed information
+            - **Zoom** with mouse wheel or touchpad
+            - **Pan** by dragging the plot
+            - **Reset view** with home button in toolbar
+            """)
     
     # Main content
-    if 'plot_data' not in locals():
-        st.info("👈 Please select a plot data file from the sidebar")
+    if plot_data is None:
+        st.warning("""
+        ## Welcome to Chemical Space Visualization!
         
-        if plot_files:
-            st.write("**Available files:**")
-            for file in plot_files:
-                st.write(f"• `{file}`")
+        To get started:
         
-        st.markdown("""
-        ### 📋 How to Use
+        1. Run the main analysis script to generate `plot_data.json`
+        2. Upload the JSON file using the sidebar
+        3. Or place `plot_data.json` in the same directory as this app
         
-        1. **Add plot data files** (JSON or PKL) to your GitHub repository
-        2. **Select a file** from the sidebar dropdown
-        3. **Explore** the interactive visualization
-        4. **Adjust settings** using the sidebar controls
-        
-        ### 🧪 Expected Data Format
-        
-        The plot data files should contain:
-        - Molecular coordinates and properties
-        - Database information
-        - KNN analysis results
-        - Visualization parameters
+        The visualization will show:
+        - Molecular distributions across different databases
+        - PCA/UMAP projections of chemical space
+        - KNN connections between molecules
+        - Neighbor candidates highlighted in red
+        - Interactive exploration capabilities
         """)
+        
+        # Show example image or placeholder
+        st.image("https://via.placeholder.com/800x400/1f77b4/ffffff?text=Chemical+Space+Visualization", 
+                use_column_width=True)
+        
         return
     
     # Create tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Interactive Map", "📊 Statistics", "🔍 KNN Results", "ℹ️ About"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Interactive Map", "📊 Statistics", "🔍 Molecule Explorer", "🎯 Neighbor Analysis"])
     
     with tab1:
         st.markdown('<h2 class="sub-header">Interactive Chemical Space Map</h2>', unsafe_allow_html=True)
@@ -389,15 +386,15 @@ def main():
         # Display the plot
         st.plotly_chart(fig, use_container_width=True)
         
-        # Add context information
+        # Add some context
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("""
             <div class="info-box">
             <h4>About this Visualization</h4>
-            <p>This map shows molecules projected into 2D space using PCA and UMAP. 
-            Colors represent different databases, and connections show molecular similarities.</p>
+            <p>This map shows molecules projected into 2D space using PCA and UMAP dimensionality reduction techniques. 
+            Colors represent different databases, and connections show molecular similarities detected by KNN analysis.</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -407,8 +404,9 @@ def main():
             <h4>How to Interpret</h4>
             <p>• <strong>Closer points</strong> = More similar molecules<br>
             • <strong>Colors</strong> = Source database<br>
-            • <strong>Dashed lines</strong> = KNN similarity connections<br>
-            • <strong>Hover</strong> for molecule details</p>
+            • <strong>Red points</strong> = Neighbor candidates<br>
+            • <strong>Gray lines</strong> = KNN similarity connections<br>
+            • <strong>Larger points</strong> = GUAPOS molecules</p>
             </div>
             """, unsafe_allow_html=True)
     
@@ -416,82 +414,231 @@ def main():
         st.markdown('<h2 class="sub-header">Database Statistics</h2>', unsafe_allow_html=True)
         
         # Create statistics visualizations
-        db_fig, summary_df = create_database_summary(plot_data)
-        
         col1, col2 = st.columns(2)
         
         with col1:
+            # Database distribution
+            db_fig = create_database_summary(plot_data)
             st.plotly_chart(db_fig, use_container_width=True)
         
         with col2:
-            st.dataframe(
-                summary_df,
-                use_container_width=True,
-                hide_index=True
-            )
+            # Additional statistics
+            total_molecules = len(plot_data['points'])
+            unique_databases = len(set(plot_data['databases']))
             
-            # Additional stats
-            total_molecules = len(plot_data.get('points', []))
-            unique_dbs = len(summary_df)
+            st.metric("Total Molecules", f"{total_molecules:,}")
+            st.metric("Unique Databases", unique_databases)
             
-            st.metric("Total Molecules", total_molecules)
-            st.metric("Unique Databases", unique_dbs)
+            if plot_data.get('knn_connections'):
+                st.metric("KNN Connections", len(plot_data['knn_connections']))
+            
+            # Show neighbor candidate count
+            neighbor_dbs = create_neighbor_analysis_panel(plot_data)
+            if neighbor_dbs:
+                total_neighbors = sum(neighbor_dbs.values())
+                st.metric("Neighbor Candidates", total_neighbors)
+            
+            # Show database details
+            st.write("**Database Details:**")
+            db_counts = pd.Series(plot_data['databases']).value_counts()
+            for db, count in db_counts.items():
+                percentage = (count / total_molecules) * 100
+                st.write(f"• {db}: {count} ({percentage:.1f}%)")
     
     with tab3:
-        st.markdown('<h2 class="sub-header">KNN Analysis Results</h2>', unsafe_allow_html=True)
+        st.markdown('<h2 class="sub-header">Molecule Explorer</h2>', unsafe_allow_html=True)
         
-        knn_table = create_knn_results_table(plot_data)
-        if knn_table is not None:
-            st.dataframe(
-                knn_table,
-                use_container_width=True,
-                hide_index=True,
-                height=400
+        # Create a searchable table of molecules
+        molecules_df = pd.DataFrame({
+            'Database': plot_data['databases'],
+            'Name': plot_data['labels'],
+            'Formula': plot_data['formulas'],
+            'X': [p[0] for p in plot_data['points']],
+            'Y': [p[1] for p in plot_data['points']],
+            'Index': range(len(plot_data['points']))
+        })
+        
+        # Identify neighbor candidates
+        neighbor_indices = set()
+        if plot_data.get('knn_connections'):
+            for connection in plot_data['knn_connections']:
+                neighbor_indices.add(connection['neighbor_index'])
+        
+        molecules_df['Is_Neighbor'] = molecules_df['Index'].isin(neighbor_indices)
+        
+        # Search and filter options
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            selected_db = st.multiselect(
+                "Filter by Database",
+                options=sorted(molecules_df['Database'].unique()),
+                default=sorted(molecules_df['Database'].unique())
             )
+        
+        with col2:
+            neighbor_filter = st.selectbox(
+                "Neighbor Status",
+                options=["All", "Neighbors Only", "Non-Neighbors Only"]
+            )
+        
+        with col3:
+            search_term = st.text_input("Search by Name or Formula", "")
+        
+        # Apply filters
+        filtered_df = molecules_df[molecules_df['Database'].isin(selected_db)]
+        
+        if neighbor_filter == "Neighbors Only":
+            filtered_df = filtered_df[filtered_df['Is_Neighbor'] == True]
+        elif neighbor_filter == "Non-Neighbors Only":
+            filtered_df = filtered_df[filtered_df['Is_Neighbor'] == False]
+        
+        if search_term:
+            filtered_df = filtered_df[
+                filtered_df['Name'].str.contains(search_term, case=False, na=False) |
+                filtered_df['Formula'].str.contains(search_term, case=False, na=False)
+            ]
+        
+        # Display results
+        st.write(f"**Found {len(filtered_df)} molecules**")
+        
+        # Pagination
+        page_size = 20
+        total_pages = max(1, (len(filtered_df) + page_size - 1) // page_size)
+        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+        
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, len(filtered_df))
+        
+        # Display molecules
+        for idx in range(start_idx, end_idx):
+            molecule = filtered_df.iloc[idx]
+            card_class = "neighbor-point" if molecule['Is_Neighbor'] else "molecule-card"
             
-            # Download button
-            csv = knn_table.to_csv(index=False)
-            st.download_button(
-                "📥 Download KNN Results",
-                data=csv,
-                file_name="knn_results.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("No KNN results found in the selected file.")
+            with st.expander(f"{molecule['Name'] or 'Unknown'} - {molecule['Database']} {'🎯' if molecule['Is_Neighbor'] else ''}"):
+                st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write(f"**Database:** {molecule['Database']}")
+                    st.write(f"**Name:** {molecule['Name'] or 'Unknown'}")
+                    if molecule['Is_Neighbor']:
+                        st.write("**Status:** 🎯 Neighbor Candidate")
+                    
+                with col2:
+                    st.write(f"**Formula:** {format_chemical_formula(molecule['Formula'])}", unsafe_allow_html=True)
+                    st.write(f"**Coordinates:** ({molecule['X']:.3f}, {molecule['Y']:.3f})")
+                    st.write(f"**Index:** {molecule['Index']}")
+                
+                st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Download option
+        csv = filtered_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Filtered Data",
+            data=csv,
+            file_name="filtered_molecules.csv",
+            mime="text/csv"
+        )
     
     with tab4:
-        st.markdown('<h2 class="sub-header">About This Visualization</h2>', unsafe_allow_html=True)
+        st.markdown('<h2 class="sub-header">🎯 Neighbor Candidate Analysis</h2>', unsafe_allow_html=True)
         
-        st.markdown("""
-        ### 🧪 Chemical Space Analysis
-        
-        This interactive visualization shows the results of chemical space analysis using:
-        
-        - **PCA (Principal Component Analysis)**: Linear dimensionality reduction
-        - **UMAP (Uniform Manifold Approximation and Projection)**: Non-linear dimensionality reduction
-        - **KNN (K-Nearest Neighbors)**: Similarity search algorithm
-        
-        ### 🎨 Color Coding
-        
-        - **Blue**: GUAPOS molecules
-        - **Orange**: TMC_1 database
-        - **Green**: All_Discoveries database
-        - **Yellow**: KIDA database
-        - **Purple**: PubChem database
-        
-        ### 🔍 Interactive Features
-        
-        - **Hover** over points to see molecule details
-        - **Zoom** and **pan** to explore different regions
-        - **Filter** databases using the sidebar
-        - **Download** results for further analysis
-        
-        ### 📁 Data Sources
-        
-        The visualization automatically detects plot data files in the repository.
-        Supported formats: JSON and PKL files generated by the analysis pipeline.
-        """)
+        if not plot_data.get('knn_connections'):
+            st.info("No KNN connections found in the data.")
+        else:
+            # Get neighbor analysis
+            neighbor_dbs = create_neighbor_analysis_panel(plot_data)
+            
+            if neighbor_dbs:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Neighbor distribution by database
+                    neighbor_df = pd.DataFrame({
+                        'Database': list(neighbor_dbs.keys()),
+                        'Count': list(neighbor_dbs.values())
+                    })
+                    
+                    fig = px.pie(
+                        neighbor_df,
+                        values='Count',
+                        names='Database',
+                        title='Neighbor Candidates by Database',
+                        color='Database',
+                        color_discrete_map={
+                            'GUAPOS': '#1f77b4',
+                            'TMC_1': '#ff7f0e',
+                            'All_Discoveries': '#2ca02c',
+                            'KIDA': '#FFFF00',
+                            'PubChem': '#9467bd'
+                        }
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    # Neighbor statistics
+                    total_neighbors = sum(neighbor_dbs.values())
+                    total_connections = len(plot_data['knn_connections'])
+                    
+                    st.metric("Total Neighbor Candidates", total_neighbors)
+                    st.metric("Total KNN Connections", total_connections)
+                    st.metric("Average Connections per Candidate", f"{total_connections/total_neighbors:.1f}")
+                    
+                    st.write("**Neighbor Distribution:**")
+                    for db, count in neighbor_dbs.items():
+                        percentage = (count / total_neighbors) * 100
+                        st.write(f"• {db}: {count} ({percentage:.1f}%)")
+                
+                # Show detailed neighbor information
+                st.markdown("### Detailed Neighbor Information")
+                
+                # Get all neighbor molecules
+                neighbor_indices = set()
+                for connection in plot_data['knn_connections']:
+                    neighbor_indices.add(connection['neighbor_index'])
+                
+                neighbor_molecules = []
+                for idx in neighbor_indices:
+                    if idx < len(plot_data['points']):
+                        neighbor_molecules.append({
+                            'Index': idx,
+                            'Database': plot_data['databases'][idx],
+                            'Name': plot_data['labels'][idx] or 'Unknown',
+                            'Formula': plot_data['formulas'][idx] or 'Unknown',
+                            'X': plot_data['points'][idx][0],
+                            'Y': plot_data['points'][idx][1]
+                        })
+                
+                neighbor_df = pd.DataFrame(neighbor_molecules)
+                
+                if not neighbor_df.empty:
+                    # Display neighbor table
+                    st.dataframe(
+                        neighbor_df,
+                        column_config={
+                            "Index": st.column_config.NumberColumn("Index"),
+                            "Database": "Database",
+                            "Name": "Name",
+                            "Formula": "Formula",
+                            "X": st.column_config.NumberColumn("X", format="%.3f"),
+                            "Y": st.column_config.NumberColumn("Y", format="%.3f")
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                    
+                    # Download neighbors
+                    csv = neighbor_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Neighbor Candidates",
+                        data=csv,
+                        file_name="neighbor_candidates.csv",
+                        mime="text/csv"
+                    )
+            else:
+                st.info("No neighbor candidates found in the data.")
 
 if __name__ == "__main__":
     main()
