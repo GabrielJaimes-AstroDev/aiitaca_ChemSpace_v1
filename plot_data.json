@@ -1,0 +1,21 @@
+{
+  "metadata": {
+    "timestamp": "2025-08-20T22:34:02.364907",
+    "neighbor_database": "PubChem",
+    "total_molecules": 345682,
+    "databases_present": {
+      "PubChem": 345300,
+      "All_Discoveries": 253,
+      "GUAPOS": 65,
+      "TMC_1": 64
+    }
+  },
+  "molecules": [
+    {
+      "index": 0,
+      "name": "Methyl formate",
+      "formula": "CH3OCHO",
+      "smiles": "COC=O",
+      "database": "GUAPOS",
+      "detected": 1,
+      "x": 
