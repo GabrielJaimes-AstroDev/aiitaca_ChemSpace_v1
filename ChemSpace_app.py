@@ -5,14 +5,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
-import pickle
 import re
-import tempfile
-import os
 
 # Page configuration
 st.set_page_config(
-    page_title="Molecular Space Analysis",
+    page_title="Chemical Space Visualization",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,7 +19,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
+        font-size: 2.5rem;
         color: #1f77b4;
         text-align: center;
         margin-bottom: 2rem;
@@ -33,143 +30,131 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     .info-box {
-        background-color: #f0f2f6;
+        background-color: #f0f8ff;
         padding: 1rem;
         border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
         margin-bottom: 1rem;
     }
     .molecule-card {
-        border: 1px solid #ddd;
-        border-radius: 0.5rem;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        background-color: white;
+        background-color: #f8f9fa;
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        margin: 0.2rem 0;
+        border-left: 3px solid #9467bd;
     }
 </style>
 """, unsafe_allow_html=True)
 
-def load_data(file_path):
-    """Load data from JSON or pickle file"""
+def load_plot_data(file_path):
+    """Load plot data from JSON file"""
     try:
-        if file_path.endswith('.json'):
-            with open(file_path, 'r') as f:
-                return json.load(f)
-        elif file_path.endswith('.pkl'):
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
+        with open(file_path, 'r') as f:
+            return json.load(f)
     except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
+        st.error(f"Error loading plot data: {str(e)}")
         return None
-    return None
 
-def reformat_chemical_formula(formula):
+def format_chemical_formula(formula):
     """Format chemical formula with subscripts"""
-    try:
-        if not formula or pd.isna(formula) or str(formula).lower() == 'nan':
-            return ""
-        formula = str(formula).strip()
-        formula = re.sub(r'(\d+)', r'<sub>\1</sub>', formula)
-        formula = re.sub(r'([+-]\d*)', r'<sup>\1</sup>', formula)
-        return formula
-    except:
-        return str(formula) if formula else ""
+    if not formula or pd.isna(formula):
+        return ""
+    
+    # Handle subscripts
+    formula = re.sub(r'(\d+)', r'<sub>\1</sub>', str(formula))
+    
+    # Handle ionic charges
+    formula = re.sub(r'([+-]\d*)', r'<sup>\1</sup>', formula)
+    
+    return formula
 
-def create_interactive_plot(data):
+def create_interactive_plot(plot_data):
     """Create interactive Plotly visualization"""
-    if not data or 'molecules' not in data:
-        st.error("No molecule data available")
-        return go.Figure()
     
-    molecules_df = pd.DataFrame(data['molecules'])
+    # Create DataFrame from plot data
+    df_points = pd.DataFrame({
+        'x': [point[0] for point in plot_data['points']],
+        'y': [point[1] for point in plot_data['points']],
+        'label': plot_data['labels'],
+        'database': plot_data['databases'],
+        'formula': plot_data['formulas'],
+        'color': plot_data['colors']
+    })
     
-    # Create figure
+    # Create the main scatter plot
     fig = go.Figure()
     
-    # Group by database and add traces
-    databases = molecules_df['database'].unique()
-    colors = data.get('visualization_settings', {}).get('db_colors', {})
-    
+    # Add points for each database
+    databases = df_points['database'].unique()
     for db in databases:
-        db_data = molecules_df[molecules_df['database'] == db]
-        color = colors.get(db, '#cccccc')
+        db_mask = df_points['database'] == db
+        db_data = df_points[db_mask]
         
-        # Custom hover text
+        # Create hover text
         hover_text = []
         for _, row in db_data.iterrows():
-            hover_text.append(
-                f"<b>Name:</b> {row.get('name', 'N/A')}<br>"
-                f"<b>Formula:</b> {reformat_chemical_formula(row.get('formula', ''))}<br>"
-                f"<b>Database:</b> {row.get('database', 'N/A')}<br>"
-                f"<b>Detected:</b> {row.get('detected', 'N/A')}"
-            )
+            text = f"Database: {row['database']}<br>"
+            if row['label']:
+                text += f"Name: {row['label']}<br>"
+            if row['formula']:
+                formatted_formula = format_chemical_formula(row['formula'])
+                text += f"Formula: {formatted_formula}"
+            hover_text.append(text)
         
         fig.add_trace(go.Scatter(
             x=db_data['x'],
             y=db_data['y'],
             mode='markers',
-            name=db,
             marker=dict(
-                size=8 if db != 'PubChem' else 6,
-                color=color,
-                opacity=0.7 if db != 'PubChem' else 0.3,
-                line=dict(width=0.5, color='black')
+                color=db_data['color'].iloc[0],
+                size=8 if db == 'PubChem' else 12,
+                opacity=0.3 if db == 'PubChem' else 0.7
             ),
-            text=hover_text,
+            name=db,
+            hovertext=hover_text,
             hoverinfo='text',
-            customdata=db_data[['name', 'formula', 'database', 'detected']].values
+            showlegend=True
         ))
     
-    # Add GUAPOS molecules with special styling
-    if 'GUAPOS' in databases:
-        guapos_data = molecules_df[molecules_df['database'] == 'GUAPOS']
-        detected_data = guapos_data[guapos_data['detected'] == 1]
-        not_detected_data = guapos_data[guapos_data['detected'] == 0]
-        
-        if not detected_data.empty:
-            fig.add_trace(go.Scatter(
-                x=detected_data['x'],
-                y=detected_data['y'],
-                mode='markers+text',
-                name='GUAPOS (Detected)',
-                marker=dict(
-                    size=12,
-                    color='blue',
-                    opacity=0.9,
-                    line=dict(width=2, color='black')
-                ),
-                text=[reformat_chemical_formula(f) for f in detected_data['formula']],
-                textposition='top center',
-                textfont=dict(size=10, color='black'),
-                hoverinfo='text',
-                customdata=detected_data[['name', 'formula', 'database', 'detected']].values
-            ))
-        
-        if not not_detected_data.empty:
-            fig.add_trace(go.Scatter(
-                x=not_detected_data['x'],
-                y=not_detected_data['y'],
-                mode='markers',
-                name='GUAPOS (Not Detected)',
-                marker=dict(
-                    size=10,
-                    color='gray',
+    # Add KNN connections if they exist
+    if plot_data.get('knn_connections'):
+        connections = plot_data['knn_connections']
+        for connection in connections:
+            guapos_idx = connection['guapos_index']
+            neighbor_idx = connection['neighbor_index']
+            
+            if (guapos_idx < len(plot_data['points']) and 
+                neighbor_idx < len(plot_data['points'])):
+                
+                x0, y0 = plot_data['points'][guapos_idx]
+                x1, y1 = plot_data['points'][neighbor_idx]
+                
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode='lines',
+                    line=dict(color='gray', width=1, dash='dash'),
                     opacity=0.6,
-                    line=dict(width=1, color='black')
-                ),
-                hoverinfo='text',
-                customdata=not_detected_data[['name', 'formula', 'database', 'detected']].values
-            ))
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
     
     # Update layout
     fig.update_layout(
-        title=f"Molecular Space Analysis - {data.get('metadata', {}).get('neighbor_database', 'Unknown')} Neighbors",
-        xaxis_title="UMAP Dimension 1",
-        yaxis_title="UMAP Dimension 2",
-        showlegend=True,
+        title="Chemical Space Visualization - PCA/UMAP Projection",
+        xaxis_title="Dimension 1",
+        yaxis_title="Dimension 2",
         hovermode='closest',
-        width=1000,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
         height=700,
-        plot_bgcolor='white'
+        width=1000
     )
     
     fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False)
@@ -177,225 +162,264 @@ def create_interactive_plot(data):
     
     return fig
 
-def create_statistics_dashboard(data):
-    """Create statistics dashboard"""
-    if not data or 'molecules' not in data:
-        st.error("No data available for statistics")
-        return
+def create_database_summary(plot_data):
+    """Create database summary statistics"""
+    databases = plot_data['databases']
+    db_counts = pd.Series(databases).value_counts().reset_index()
+    db_counts.columns = ['Database', 'Count']
     
-    molecules_df = pd.DataFrame(data['molecules'])
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Total Molecules", len(molecules_df))
-    
-    with col2:
-        guapos_count = len(molecules_df[molecules_df['database'] == 'GUAPOS'])
-        st.metric("GUAPOS Molecules", guapos_count)
-    
-    with col3:
-        neighbor_db = data.get('metadata', {}).get('neighbor_database', 'Unknown')
-        neighbor_count = len(molecules_df[molecules_df['database'] == neighbor_db])
-        st.metric(f"{neighbor_db} Molecules", neighbor_count)
-    
-    # Database distribution
-    st.subheader("Database Distribution")
-    db_counts = molecules_df['database'].value_counts()
-    fig_db = px.pie(
-        values=db_counts.values,
-        names=db_counts.index,
-        title="Molecules by Database"
+    fig = px.bar(
+        db_counts,
+        x='Database',
+        y='Count',
+        color='Database',
+        title="Molecule Distribution by Database",
+        color_discrete_map={
+            'GUAPOS': '#1f77b4',
+            'TMC_1': '#ff7f0e',
+            'All_Discoveries': '#2ca02c',
+            'KIDA': '#FFFF00',
+            'PubChem': '#9467bd'
+        }
     )
-    st.plotly_chart(fig_db, use_container_width=True)
     
-    # Detection status for GUAPOS
-    if 'GUAPOS' in molecules_df['database'].unique():
-        st.subheader("GUAPOS Detection Status")
-        guapos_data = molecules_df[molecules_df['database'] == 'GUAPOS']
-        detected_counts = guapos_data['detected'].value_counts()
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_detection = px.pie(
-                values=detected_counts.values,
-                names=detected_counts.index.map({1: 'Detected', 0: 'Not Detected'}),
-                title="GUAPOS Detection Status"
-            )
-            st.plotly_chart(fig_detection, use_container_width=True)
-        
-        with col2:
-            if data.get('knn_results'):
-                detected_with_neighbors = sum(1 for res in data['knn_results'] 
-                                           if res.get('detected') == 1 and res.get('neighbors'))
-                st.metric("GUAPOS with Neighbors", detected_with_neighbors)
+    fig.update_layout(
+        xaxis_title="Database",
+        yaxis_title="Number of Molecules",
+        showlegend=False
+    )
+    
+    return fig
 
-def display_neighbors_table(data):
-    """Display neighbors table"""
-    if not data or not data.get('knn_results'):
-        st.warning("No KNN results available")
-        return
+def create_molecule_info_panel(plot_data, selected_point):
+    """Create molecule information panel"""
+    if selected_point is None:
+        return None
     
-    knn_results = data['knn_results']
-    neighbor_db = data.get('metadata', {}).get('neighbor_database', 'Unknown')
+    point_idx = selected_point['pointIndex']
     
-    st.subheader(f"KNN Analysis Results - {neighbor_db} Neighbors")
+    if point_idx >= len(plot_data['points']):
+        return None
     
-    # Filter only detected molecules with neighbors
-    detected_results = [res for res in knn_results if res.get('detected') == 1 and res.get('neighbors')]
+    info = {
+        'Database': plot_data['databases'][point_idx],
+        'Name': plot_data['labels'][point_idx] or 'Unknown',
+        'Formula': plot_data['formulas'][point_idx] or 'Unknown',
+        'Coordinates': f"({plot_data['points'][point_idx][0]:.3f}, {plot_data['points'][point_idx][1]:.3f})"
+    }
     
-    if not detected_results:
-        st.info("No detected molecules with neighbors found")
-        return
-    
-    # Create expandable sections for each GUAPOS molecule
-    for i, result in enumerate(detected_results):
-        with st.expander(f"{result.get('guapos_name', 'Unknown')} - {reformat_chemical_formula(result.get('guapos_formula', ''))}"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown(f"**SMILES:** `{result.get('guapos_smiles', 'N/A')}`")
-                st.markdown(f"**Status:** Detected")
-            
-            with col2:
-                if result.get('neighbors'):
-                    st.markdown(f"**Nearest Neighbor:** {result['neighbors'][0].get('name', 'Unknown')}")
-                    st.markdown(f"**Distance:** {result['neighbors'][0].get('distance', 0):.4f}")
-            
-            # Display neighbors table
-            if result.get('neighbors'):
-                neighbors_df = pd.DataFrame(result['neighbors'])
-                st.dataframe(
-                    neighbors_df[['rank', 'name', 'formula', 'distance', 'database']],
-                    use_container_width=True,
-                    height=200
-                )
+    return info
 
 def main():
-    # Header
-    st.markdown('<h1 class="main-header">🧪 Molecular Space Analysis</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🧪 Chemical Space Visualization</h1>', unsafe_allow_html=True)
     
-    # Initialize session state for data
-    if 'analysis_data' not in st.session_state:
-        st.session_state.analysis_data = None
-    
-    # Sidebar for file upload
+    # Sidebar
     with st.sidebar:
-        st.header("Data Input")
+        st.header("📊 Data Configuration")
+        
+        # File upload
         uploaded_file = st.file_uploader(
-            "Upload analysis data",
-            type=['json', 'pkl'],
-            help="Upload the JSON or pickle file generated by the analysis"
+            "Upload plot data JSON",
+            type=['json'],
+            help="Upload the plot_data.json file generated by the analysis script"
         )
         
         if uploaded_file is not None:
             try:
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_path = tmp_file.name
-                
-                # Load data
-                data = load_data(tmp_path)
-                
-                if data:
-                    st.session_state.analysis_data = data
-                    st.success("Data loaded successfully!")
-                    
-                    # Display metadata
-                    st.subheader("Dataset Information")
-                    st.write(f"**Total molecules:** {data.get('metadata', {}).get('total_molecules', 'N/A')}")
-                    st.write(f"**Neighbor database:** {data.get('metadata', {}).get('neighbor_database', 'N/A')}")
-                    st.write(f"**Analysis date:** {data.get('metadata', {}).get('timestamp', 'N/A')}")
-                    
-                    # Database counts
-                    if 'metadata' in data and 'databases_present' in data['metadata']:
-                        st.subheader("Database Counts")
-                        for db, count in data['metadata']['databases_present'].items():
-                            st.write(f"{db}: {count}")
-                
-                # Clean up temporary file
-                os.unlink(tmp_path)
-                    
+                plot_data = json.load(uploaded_file)
+                st.success("✅ Data loaded successfully!")
             except Exception as e:
-                st.error(f"Error processing file: {str(e)}")
-                st.session_state.analysis_data = None
+                st.error(f"❌ Error loading file: {str(e)}")
+                plot_data = None
         else:
-            st.info("Please upload a analysis data file to begin")
+            # Try to load from default path
+            try:
+                plot_data = load_plot_data("plot_data.json")
+                if plot_data:
+                    st.info("📁 Using default plot_data.json file")
+            except:
+                plot_data = None
+                st.warning("⚠️ Please upload a plot data JSON file")
+        
+        if plot_data:
+            st.markdown("---")
+            st.header("🎨 Display Options")
+            
+            # Show database summary
+            db_counts = pd.Series(plot_data['databases']).value_counts()
+            st.write("**Database Summary:**")
+            for db, count in db_counts.items():
+                st.write(f"• {db}: {count} molecules")
+            
+            # Show KNN info if available
+            if plot_data.get('knn_connections'):
+                st.write(f"• KNN Connections: {len(plot_data['knn_connections'])}")
+            
+            st.markdown("---")
+            st.header("🔍 Interaction Guide")
+            st.info("""
+            - **Hover** over points to see molecule details
+            - **Click** on points to view detailed information
+            - **Zoom** with mouse wheel or touchpad
+            - **Pan** by dragging the plot
+            - **Reset view** with home button in toolbar
+            """)
     
     # Main content
-    if st.session_state.analysis_data:
-        data = st.session_state.analysis_data
+    if plot_data is None:
+        st.warning("""
+        ## Welcome to Chemical Space Visualization!
         
-        # Create tabs
-        tab1, tab2, tab3 = st.tabs(["Interactive Plot", "Statistics", "Neighbors Table"])
+        To get started:
         
-        with tab1:
-            st.subheader("Interactive Molecular Space Visualization")
-            fig = create_interactive_plot(data)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Additional information
-            st.markdown("""
-            **Interaction Guide:**
-            - **Hover** over points to see molecular details
-            - **Click and drag** to zoom in on specific areas
-            - **Double-click** to reset the view
-            - **Toggle databases** using the legend
-            """)
+        1. Run the main analysis script to generate `plot_data.json`
+        2. Upload the JSON file using the sidebar
+        3. Or place `plot_data.json` in the same directory as this app
         
-        with tab2:
-            create_statistics_dashboard(data)
+        The visualization will show:
+        - Molecular distributions across different databases
+        - PCA/UMAP projections of chemical space
+        - KNN connections between molecules
+        - Interactive exploration capabilities
+        """)
         
-        with tab3:
-            display_neighbors_table(data)
-            
-    else:
-        # Welcome screen with instructions
-        st.markdown("""
-        <div class="info-box">
-            <h3>Welcome to Molecular Space Analysis</h3>
-            <p>This application visualizes molecular space analysis data including:</p>
-            <ul>
-                <li>Interactive 2D molecular space visualization</li>
-                <li>Statistical analysis of molecular distributions</li>
-                <li>KNN neighbor results tables</li>
-                <li>Database-specific molecular information</li>
-            </ul>
-            <p><b>To get started:</b></p>
-            <ol>
-                <li>Run the molecular analysis script to generate data</li>
-                <li>Upload the resulting JSON or pickle file using the sidebar</li>
-                <li>Explore the results through the interactive tabs</li>
-            </ol>
-        </div>
-        """, unsafe_allow_html=True)
+        # Show example image or placeholder
+        st.image("https://via.placeholder.com/800x400/1f77b4/ffffff?text=Chemical+Space+Visualization", 
+                use_column_width=True)
         
-        # Example section
+        return
+    
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📈 Interactive Map", "📊 Statistics", "🔍 Molecule Explorer"])
+    
+    with tab1:
+        st.markdown('<h2 class="sub-header">Interactive Chemical Space Map</h2>', unsafe_allow_html=True)
+        
+        # Create interactive plot
+        fig = create_interactive_plot(plot_data)
+        
+        # Display the plot
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Add some context
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Expected Data Format")
             st.markdown("""
-            The application expects a JSON or pickle file containing:
-            - Molecular coordinates (x, y)
-            - Database information
-            - Detection status
-            - KNN analysis results
-            - Molecular properties (name, formula, SMILES)
-            """)
+            <div class="info-box">
+            <h4>About this Visualization</h4>
+            <p>This map shows molecules projected into 2D space using PCA and UMAP dimensionality reduction techniques. 
+            Colors represent different databases, and connections show molecular similarities detected by KNN analysis.</p>
+            </div>
+            """, unsafe_allow_html=True)
         
         with col2:
-            st.subheader("Supported Features")
             st.markdown("""
-            - Multiple molecular databases
-            - Interactive visualization
-            - Statistical analysis
-            - Detailed molecular information
-            - Responsive design
-            - Cross-platform compatibility
-            """)
+            <div class="info-box">
+            <h4>How to Interpret</h4>
+            <p>• <strong>Closer points</strong> = More similar molecules<br>
+            • <strong>Colors</strong> = Source database<br>
+            • <strong>Gray lines</strong> = KNN similarity connections<br>
+            • <strong>Larger points</strong> = GUAPOS molecules</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with tab2:
+        st.markdown('<h2 class="sub-header">Database Statistics</h2>', unsafe_allow_html=True)
+        
+        # Create statistics visualizations
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Database distribution
+            db_fig = create_database_summary(plot_data)
+            st.plotly_chart(db_fig, use_container_width=True)
+        
+        with col2:
+            # Additional statistics
+            total_molecules = len(plot_data['points'])
+            unique_databases = len(set(plot_data['databases']))
+            
+            st.metric("Total Molecules", f"{total_molecules:,}")
+            st.metric("Unique Databases", unique_databases)
+            
+            if plot_data.get('knn_connections'):
+                st.metric("KNN Connections", len(plot_data['knn_connections']))
+            
+            # Show database details
+            st.write("**Database Details:**")
+            db_counts = pd.Series(plot_data['databases']).value_counts()
+            for db, count in db_counts.items():
+                percentage = (count / total_molecules) * 100
+                st.write(f"• {db}: {count} ({percentage:.1f}%)")
+    
+    with tab3:
+        st.markdown('<h2 class="sub-header">Molecule Explorer</h2>', unsafe_allow_html=True)
+        
+        # Create a searchable table of molecules
+        molecules_df = pd.DataFrame({
+            'Database': plot_data['databases'],
+            'Name': plot_data['labels'],
+            'Formula': plot_data['formulas'],
+            'X': [p[0] for p in plot_data['points']],
+            'Y': [p[1] for p in plot_data['points']]
+        })
+        
+        # Search and filter options
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            selected_db = st.multiselect(
+                "Filter by Database",
+                options=sorted(molecules_df['Database'].unique()),
+                default=sorted(molecules_df['Database'].unique())
+            )
+        
+        with col2:
+            search_term = st.text_input("Search by Name or Formula", "")
+        
+        # Apply filters
+        filtered_df = molecules_df[molecules_df['Database'].isin(selected_db)]
+        if search_term:
+            filtered_df = filtered_df[
+                filtered_df['Name'].str.contains(search_term, case=False, na=False) |
+                filtered_df['Formula'].str.contains(search_term, case=False, na=False)
+            ]
+        
+        # Display results
+        st.write(f"**Found {len(filtered_df)} molecules**")
+        
+        # Pagination
+        page_size = 20
+        total_pages = max(1, (len(filtered_df) + page_size - 1) // page_size)
+        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+        
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, len(filtered_df))
+        
+        # Display molecules
+        for idx in range(start_idx, end_idx):
+            molecule = filtered_df.iloc[idx]
+            with st.expander(f"{molecule['Name'] or 'Unknown'} - {molecule['Database']}"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write(f"**Database:** {molecule['Database']}")
+                    st.write(f"**Name:** {molecule['Name'] or 'Unknown'}")
+                    st.write(f"**Formula:** {format_chemical_formula(molecule['Formula'])}", unsafe_allow_html=True)
+                
+                with col2:
+                    st.write(f"**Coordinates:** ({molecule['X']:.3f}, {molecule['Y']:.3f})")
+                    st.write(f"**Index:** {filtered_df.index[idx]}")
+        
+        # Download option
+        csv = filtered_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Filtered Data",
+            data=csv,
+            file_name="filtered_molecules.csv",
+            mime="text/csv"
+        )
 
 if __name__ == "__main__":
     main()
