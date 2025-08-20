@@ -50,6 +50,20 @@ st.markdown("""
         margin: 0.2rem 0;
         border-left: 3px solid #d32f2f;
     }
+    .guapos-detected {
+        background-color: #e3f2fd;
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        margin: 0.2rem 0;
+        border-left: 3px solid #1976d2;
+    }
+    .guapos-not-detected {
+        background-color: #f5f5f5;
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        margin: 0.2rem 0;
+        border-left: 3px solid #9e9e9e;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -64,7 +78,7 @@ def load_plot_data(file_path):
 
 def format_chemical_formula(formula):
     """Format chemical formula with subscripts"""
-    if not formula or pd.isna(formula):
+    if not formula or pd.isna(formula) or formula == 'Unknown':
         return ""
     
     # Handle subscripts
@@ -86,11 +100,25 @@ def create_interactive_plot(plot_data):
         'database': plot_data['databases'],
         'formula': plot_data['formulas'],
         'color': plot_data['colors'],
-        'index': range(len(plot_data['points']))
+        'index': range(len(plot_data['points'])),
+        'detected': plot_data.get('detected_status', [0] * len(plot_data['points']))
     })
     
-    # Identify neighbor indices
+    # Identify neighbor indices and GUAPOS indices
     neighbor_indices = set()
+    guapos_indices = set()
+    detected_guapos_indices = set()
+    not_detected_guapos_indices = set()
+    
+    # Get GUAPOS molecules
+    guapos_mask = df_points['database'] == 'GUAPOS'
+    guapos_indices = set(df_points[guapos_mask]['index'])
+    
+    # Separate detected and not detected GUAPOS
+    detected_guapos_indices = set(df_points[guapos_mask & (df_points['detected'] == 1)]['index'])
+    not_detected_guapos_indices = set(df_points[guapos_mask & (df_points['detected'] == 0)]['index'])
+    
+    # Get neighbor indices from KNN connections
     if plot_data.get('knn_connections'):
         for connection in plot_data['knn_connections']:
             neighbor_indices.add(connection['neighbor_index'])
@@ -98,10 +126,12 @@ def create_interactive_plot(plot_data):
     # Create the main scatter plot
     fig = go.Figure()
     
-    # Add points for each database (excluding neighbors which will be highlighted separately)
-    databases = df_points['database'].unique()
+    # Add points for each database (excluding GUAPOS and neighbors which will be highlighted separately)
+    databases = [db for db in df_points['database'].unique() if db != 'GUAPOS']
     for db in databases:
-        db_mask = (df_points['database'] == db) & (~df_points['index'].isin(neighbor_indices))
+        db_mask = ((df_points['database'] == db) & 
+                  (~df_points['index'].isin(neighbor_indices)) &
+                  (~df_points['index'].isin(guapos_indices)))
         db_data = df_points[db_mask]
         
         if len(db_data) > 0:
@@ -127,6 +157,70 @@ def create_interactive_plot(plot_data):
                 ),
                 name=db,
                 hovertext=hover_text,
+                hoverinfo='text',
+                showlegend=True
+            ))
+    
+    # Add detected GUAPOS molecules (blue)
+    if detected_guapos_indices:
+        detected_guapos_data = df_points[df_points['index'].isin(detected_guapos_indices)]
+        
+        if len(detected_guapos_data) > 0:
+            # Create hover text for detected GUAPOS
+            guapos_hover_text = []
+            for _, row in detected_guapos_data.iterrows():
+                text = f"<span style='color: blue; font-weight: bold;'>GUAPOS (DETECTED)</span><br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                guapos_hover_text.append(text)
+            
+            fig.add_trace(go.Scatter(
+                x=detected_guapos_data['x'],
+                y=detected_guapos_data['y'],
+                mode='markers',
+                marker=dict(
+                    color='blue',
+                    size=15,
+                    opacity=0.9,
+                    line=dict(color='darkblue', width=2)
+                ),
+                name='GUAPOS (Detected)',
+                hovertext=guapos_hover_text,
+                hoverinfo='text',
+                showlegend=True
+            ))
+    
+    # Add not detected GUAPOS molecules (gray)
+    if not_detected_guapos_indices:
+        not_detected_guapos_data = df_points[df_points['index'].isin(not_detected_guapos_indices)]
+        
+        if len(not_detected_guapos_data) > 0:
+            # Create hover text for not detected GUAPOS
+            guapos_hover_text = []
+            for _, row in not_detected_guapos_data.iterrows():
+                text = f"<span style='color: gray; font-weight: bold;'>GUAPOS (NOT DETECTED)</span><br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                guapos_hover_text.append(text)
+            
+            fig.add_trace(go.Scatter(
+                x=not_detected_guapos_data['x'],
+                y=not_detected_guapos_data['y'],
+                mode='markers',
+                marker=dict(
+                    color='gray',
+                    size=12,
+                    opacity=0.7,
+                    line=dict(color='darkgray', width=1.5)
+                ),
+                name='GUAPOS (Not Detected)',
+                hovertext=guapos_hover_text,
                 hoverinfo='text',
                 showlegend=True
             ))
@@ -276,12 +370,19 @@ def create_molecule_info_panel(plot_data, selected_point):
             neighbor_indices.add(connection['neighbor_index'])
         is_neighbor = point_idx in neighbor_indices
     
+    # Check if this is a GUAPOS molecule
+    is_guapos = plot_data['databases'][point_idx] == 'GUAPOS'
+    is_detected = plot_data.get('detected_status', [0] * len(plot_data['points']))[point_idx] == 1 if is_guapos else False
+    
     info = {
         'Database': plot_data['databases'][point_idx],
         'Name': plot_data['labels'][point_idx] or 'Unknown',
         'Formula': plot_data['formulas'][point_idx] or 'Unknown',
+        'SMILES': plot_data.get('smiles', [''] * len(plot_data['points']))[point_idx] or 'Unknown',
         'Coordinates': f"({plot_data['points'][point_idx][0]:.3f}, {plot_data['points'][point_idx][1]:.3f})",
-        'Is Neighbor Candidate': is_neighbor
+        'Is Neighbor Candidate': is_neighbor,
+        'Is GUAPOS': is_guapos,
+        'Is Detected': is_detected
     }
     
     return info
@@ -327,6 +428,14 @@ def main():
             for db, count in db_counts.items():
                 st.write(f"• {db}: {count} molecules")
             
+            # Show GUAPOS detection status if available
+            if 'detected_status' in plot_data:
+                guapos_mask = np.array(plot_data['databases']) == 'GUAPOS'
+                detected_guapos = sum(np.array(plot_data['detected_status'])[guapos_mask])
+                total_guapos = sum(guapos_mask)
+                if total_guapos > 0:
+                    st.write(f"• GUAPOS Detected: {detected_guapos}/{total_guapos}")
+            
             # Show neighbor analysis if available
             neighbor_dbs = create_neighbor_analysis_panel(plot_data)
             if neighbor_dbs:
@@ -342,6 +451,8 @@ def main():
             st.header("🔍 Interaction Guide")
             st.info("""
             - **Hover** over points to see molecule details
+            - **Blue points** = Detected GUAPOS molecules
+            - **Gray points** = Not detected GUAPOS molecules
             - **Red points** = Neighbor candidates
             - **Click** on points to view detailed information
             - **Zoom** with mouse wheel or touchpad
@@ -365,6 +476,7 @@ def main():
         - PCA/UMAP projections of chemical space
         - KNN connections between molecules
         - Neighbor candidates highlighted in red
+        - GUAPOS molecules highlighted in blue/gray
         - Interactive exploration capabilities
         """)
         
@@ -404,9 +516,10 @@ def main():
             <h4>How to Interpret</h4>
             <p>• <strong>Closer points</strong> = More similar molecules<br>
             • <strong>Colors</strong> = Source database<br>
+            • <strong>Blue points</strong> = Detected GUAPOS molecules<br>
+            • <strong>Gray points</strong> = Not detected GUAPOS molecules<br>
             • <strong>Red points</strong> = Neighbor candidates<br>
-            • <strong>Gray lines</strong> = KNN similarity connections<br>
-            • <strong>Larger points</strong> = GUAPOS molecules</p>
+            • <strong>Gray lines</strong> = KNN similarity connections</p>
             </div>
             """, unsafe_allow_html=True)
     
@@ -429,6 +542,18 @@ def main():
             st.metric("Total Molecules", f"{total_molecules:,}")
             st.metric("Unique Databases", unique_databases)
             
+            # GUAPOS statistics
+            guapos_count = plot_data['databases'].count('GUAPOS')
+            if guapos_count > 0:
+                detected_guapos = 0
+                if 'detected_status' in plot_data:
+                    guapos_indices = [i for i, db in enumerate(plot_data['databases']) if db == 'GUAPOS']
+                    detected_guapos = sum(plot_data['detected_status'][i] for i in guapos_indices)
+                
+                st.metric("GUAPOS Molecules", guapos_count)
+                st.metric("Detected GUAPOS", f"{detected_guapos}/{guapos_count}")
+            
+            # KNN and neighbor statistics
             if plot_data.get('knn_connections'):
                 st.metric("KNN Connections", len(plot_data['knn_connections']))
             
@@ -453,9 +578,11 @@ def main():
             'Database': plot_data['databases'],
             'Name': plot_data['labels'],
             'Formula': plot_data['formulas'],
+            'SMILES': plot_data.get('smiles', [''] * len(plot_data['points'])),
             'X': [p[0] for p in plot_data['points']],
             'Y': [p[1] for p in plot_data['points']],
-            'Index': range(len(plot_data['points']))
+            'Index': range(len(plot_data['points'])),
+            'Detected': plot_data.get('detected_status', [0] * len(plot_data['points']))
         })
         
         # Identify neighbor candidates
@@ -467,7 +594,7 @@ def main():
         molecules_df['Is_Neighbor'] = molecules_df['Index'].isin(neighbor_indices)
         
         # Search and filter options
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             selected_db = st.multiselect(
@@ -483,6 +610,12 @@ def main():
             )
         
         with col3:
+            guapos_filter = st.selectbox(
+                "GUAPOS Status",
+                options=["All", "GUAPOS Only", "Non-GUAPOS Only"]
+            )
+        
+        with col4:
             search_term = st.text_input("Search by Name or Formula", "")
         
         # Apply filters
@@ -493,10 +626,16 @@ def main():
         elif neighbor_filter == "Non-Neighbors Only":
             filtered_df = filtered_df[filtered_df['Is_Neighbor'] == False]
         
+        if guapos_filter == "GUAPOS Only":
+            filtered_df = filtered_df[filtered_df['Database'] == 'GUAPOS']
+        elif guapos_filter == "Non-GUAPOS Only":
+            filtered_df = filtered_df[filtered_df['Database'] != 'GUAPOS']
+        
         if search_term:
             filtered_df = filtered_df[
                 filtered_df['Name'].str.contains(search_term, case=False, na=False) |
-                filtered_df['Formula'].str.contains(search_term, case=False, na=False)
+                filtered_df['Formula'].str.contains(search_term, case=False, na=False) |
+                filtered_df['SMILES'].str.contains(search_term, case=False, na=False)
             ]
         
         # Display results
@@ -513,9 +652,23 @@ def main():
         # Display molecules
         for idx in range(start_idx, end_idx):
             molecule = filtered_df.iloc[idx]
-            card_class = "neighbor-point" if molecule['Is_Neighbor'] else "molecule-card"
             
-            with st.expander(f"{molecule['Name'] or 'Unknown'} - {molecule['Database']} {'🎯' if molecule['Is_Neighbor'] else ''}"):
+            # Determine card class based on molecule type
+            if molecule['Database'] == 'GUAPOS':
+                if molecule['Detected'] == 1:
+                    card_class = "guapos-detected"
+                    status_emoji = "🔵"
+                else:
+                    card_class = "guapos-not-detected"
+                    status_emoji = "⚪"
+            elif molecule['Is_Neighbor']:
+                card_class = "neighbor-point"
+                status_emoji = "🎯"
+            else:
+                card_class = "molecule-card"
+                status_emoji = ""
+            
+            with st.expander(f"{molecule['Name'] or 'Unknown'} - {molecule['Database']} {status_emoji}"):
                 st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
                 
                 col1, col2 = st.columns(2)
@@ -523,11 +676,14 @@ def main():
                 with col1:
                     st.write(f"**Database:** {molecule['Database']}")
                     st.write(f"**Name:** {molecule['Name'] or 'Unknown'}")
+                    if molecule['Database'] == 'GUAPOS':
+                        st.write(f"**Detected:** {'Yes' if molecule['Detected'] == 1 else 'No'}")
                     if molecule['Is_Neighbor']:
                         st.write("**Status:** 🎯 Neighbor Candidate")
                     
                 with col2:
                     st.write(f"**Formula:** {format_chemical_formula(molecule['Formula'])}", unsafe_allow_html=True)
+                    st.write(f"**SMILES:** {molecule['SMILES']}")
                     st.write(f"**Coordinates:** ({molecule['X']:.3f}, {molecule['Y']:.3f})")
                     st.write(f"**Index:** {molecule['Index']}")
                 
@@ -584,7 +740,8 @@ def main():
                     
                     st.metric("Total Neighbor Candidates", total_neighbors)
                     st.metric("Total KNN Connections", total_connections)
-                    st.metric("Average Connections per Candidate", f"{total_connections/total_neighbors:.1f}")
+                    if total_neighbors > 0:
+                        st.metric("Average Connections per Candidate", f"{total_connections/total_neighbors:.1f}")
                     
                     st.write("**Neighbor Distribution:**")
                     for db, count in neighbor_dbs.items():
@@ -607,6 +764,7 @@ def main():
                             'Database': plot_data['databases'][idx],
                             'Name': plot_data['labels'][idx] or 'Unknown',
                             'Formula': plot_data['formulas'][idx] or 'Unknown',
+                            'SMILES': plot_data.get('smiles', [''] * len(plot_data['points']))[idx] or 'Unknown',
                             'X': plot_data['points'][idx][0],
                             'Y': plot_data['points'][idx][1]
                         })
@@ -622,6 +780,7 @@ def main():
                             "Database": "Database",
                             "Name": "Name",
                             "Formula": "Formula",
+                            "SMILES": "SMILES",
                             "X": st.column_config.NumberColumn("X", format="%.3f"),
                             "Y": st.column_config.NumberColumn("Y", format="%.3f")
                         },
