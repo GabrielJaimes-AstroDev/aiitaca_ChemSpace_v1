@@ -229,9 +229,42 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
                 hoverinfo='skip'
             ))
     
-    # Add KNN connections if they exist
+    # Add KNN connections if they exist (from precomputed data)
     if plot_data.get('knn_connections'):
         connections = plot_data['knn_connections']
+        
+        # Get neighbor indices to mark them as red
+        neighbor_indices = [conn['neighbor_index'] for conn in connections]
+        neighbor_points = df_points.iloc[neighbor_indices]
+        
+        # Create hover text for neighbors
+        neighbor_hover_text = []
+        for _, row in neighbor_points.iterrows():
+            text = f"Database: KNN Neighbor (PubChem)<br>"
+            if row['label']:
+                text += f"Name: {row['label']}<br>"
+            if row['formula']:
+                formatted_formula = format_chemical_formula(row['formula'])
+                text += f"Formula: {formatted_formula}"
+            neighbor_hover_text.append(text)
+        
+        # Add red points for KNN neighbors
+        fig.add_trace(go.Scatter(
+            x=neighbor_points['x'],
+            y=neighbor_points['y'],
+            mode='markers',
+            marker=dict(
+                color='red',
+                size=10,
+                opacity=0.7
+            ),
+            name='KNN Neighbors',
+            hovertext=neighbor_hover_text,
+            hoverinfo='text',
+            showlegend=True
+        ))
+        
+        # Add connections between GUAPOS points and their neighbors
         for connection in connections:
             guapos_idx = connection['guapos_index']
             neighbor_idx = connection['neighbor_index']
@@ -246,7 +279,7 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
                     x=[x0, x1],
                     y=[y0, y1],
                     mode='lines',
-                    line=dict(color='gray', width=1, dash='dash'),
+                    line=dict(color='red', width=1, dash='solid'),
                     opacity=0.6,
                     showlegend=False,
                     hoverinfo='skip'
@@ -566,21 +599,35 @@ def main():
     with tab4:
         st.markdown('<h2 class="sub-header">KNN Neighbors Analysis</h2>', unsafe_allow_html=True)
         
-        if not knn_neighbors:
+        # Use precomputed KNN connections if available, otherwise use the ones we found
+        if plot_data.get('knn_connections'):
+            knn_data = plot_data['knn_connections']
+            st.info("Using precomputed KNN connections from the uploaded data.")
+        else:
+            knn_data = knn_neighbors
+            st.info("Using KNN neighbors calculated in real-time.")
+        
+        if not knn_data:
             st.info("No KNN neighbors found. Make sure you have GUAPOS points and PubChem points in your data.")
         else:
-            st.metric("Total KNN Neighbors Found", len(knn_neighbors))
+            st.metric("Total KNN Neighbors Found", len(knn_data))
             
             # Create a summary table
             neighbor_summary = []
-            for neighbor in knn_neighbors:
-                neighbor_summary.append({
-                    'GUAPOS Molecule': neighbor['guapos_label'] or f"Index {neighbor['guapos_index']}",
-                    'GUAPOS Formula': neighbor['guapos_formula'] or 'Unknown',
-                    'Neighbor Molecule': neighbor['neighbor_label'] or f"Index {neighbor['neighbor_index']}",
-                    'Neighbor Formula': neighbor['neighbor_formula'] or 'Unknown',
-                    'Distance': f"{neighbor['distance']:.4f}"
-                })
+            for neighbor in knn_data:
+                # Handle both formats (precomputed and real-time)
+                if 'guapos_index' in neighbor:
+                    guapos_idx = neighbor['guapos_index']
+                    neighbor_idx = neighbor['neighbor_index']
+                    distance = neighbor.get('distance', 'N/A')
+                    
+                    neighbor_summary.append({
+                        'GUAPOS Molecule': plot_data['labels'][guapos_idx] or f"Index {guapos_idx}",
+                        'GUAPOS Formula': plot_data['formulas'][guapos_idx] or 'Unknown',
+                        'Neighbor Molecule': plot_data['labels'][neighbor_idx] or f"Index {neighbor_idx}",
+                        'Neighbor Formula': plot_data['formulas'][neighbor_idx] or 'Unknown',
+                        'Distance': f"{distance:.4f}" if isinstance(distance, (int, float)) else distance
+                    })
             
             neighbor_df = pd.DataFrame(neighbor_summary)
             
