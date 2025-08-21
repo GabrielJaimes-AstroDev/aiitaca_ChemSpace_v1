@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import re
+from sklearn.neighbors import NearestNeighbors
 
 # Page configuration
 st.set_page_config(
@@ -23,6 +24,13 @@ st.markdown("""
         color: #1f77b4;
         text-align: center;
         margin-bottom: 2rem;
+    }
+    .main-title {
+        font-size: 1.8rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 1rem;
+        font-weight: bold;
     }
     .sub-header {
         font-size: 1.5rem;
@@ -68,7 +76,66 @@ def format_chemical_formula(formula):
     
     return formula
 
-def create_interactive_plot(plot_data):
+def find_knn_neighbors(plot_data):
+    """Find KNN neighbors from PubChem that are close to GUAPOS points"""
+    # Create DataFrame from plot data
+    df_points = pd.DataFrame({
+        'x': [point[0] for point in plot_data['points']],
+        'y': [point[1] for point in plot_data['points']],
+        'label': plot_data['labels'],
+        'database': plot_data['databases'],
+        'formula': plot_data['formulas'],
+        'color': plot_data['colors'],
+        'index': range(len(plot_data['points']))
+    })
+    
+    # Get GUAPOS points
+    guapos_points = df_points[df_points['database'] == 'GUAPOS'][['x', 'y']].values
+    
+    # Get PubChem points that are not in All_Discoveries or TMC_1
+    pubchem_mask = (df_points['database'] == 'PubChem') & \
+                  (~df_points['label'].isin(df_points[df_points['database'] == 'All_Discoveries']['label'])) & \
+                  (~df_points['label'].isin(df_points[df_points['database'] == 'TMC_1']['label']))
+    pubchem_points = df_points[pubchem_mask][['x', 'y']].values
+    pubchem_indices = df_points[pubchem_mask]['index'].values
+    
+    if len(guapos_points) == 0 or len(pubchem_points) == 0:
+        return []
+    
+    # Find 10 nearest neighbors for each GUAPOS point
+    n_neighbors = min(10, len(pubchem_points))
+    knn = NearestNeighbors(n_neighbors=n_neighbors)
+    knn.fit(pubchem_points)
+    
+    # Get distances and indices of nearest neighbors
+    distances, indices = knn.kneighbors(guapos_points)
+    
+    # Collect unique neighbors (avoid duplicates)
+    unique_neighbors = set()
+    neighbor_info = []
+    
+    for i, (guapos_idx, guapos_point) in enumerate(zip(df_points[df_points['database'] == 'GUAPOS']['index'].values, guapos_points)):
+        for j, neighbor_idx in enumerate(indices[i]):
+            pubchem_index = pubchem_indices[neighbor_idx]
+            
+            if pubchem_index not in unique_neighbors:
+                unique_neighbors.add(pubchem_index)
+                
+                neighbor_info.append({
+                    'guapos_index': int(guapos_idx),
+                    'neighbor_index': int(pubchem_index),
+                    'distance': float(distances[i][j]),
+                    'guapos_point': [float(guapos_point[0]), float(guapos_point[1])],
+                    'neighbor_point': [float(pubchem_points[neighbor_idx][0]), float(pubchem_points[neighbor_idx][1])],
+                    'guapos_label': df_points.iloc[guapos_idx]['label'],
+                    'neighbor_label': df_points.iloc[pubchem_index]['label'],
+                    'guapos_formula': df_points.iloc[guapos_idx]['formula'],
+                    'neighbor_formula': df_points.iloc[pubchem_index]['formula']
+                })
+    
+    return neighbor_info
+
+def create_interactive_plot(plot_data, knn_neighbors=None):
     """Create interactive Plotly visualization"""
     
     # Create DataFrame from plot data
@@ -115,6 +182,52 @@ def create_interactive_plot(plot_data):
             hoverinfo='text',
             showlegend=True
         ))
+    
+    # Add KNN neighbors from PubChem (red points)
+    if knn_neighbors:
+        neighbor_indices = [neighbor['neighbor_index'] for neighbor in knn_neighbors]
+        neighbor_points = df_points.iloc[neighbor_indices]
+        
+        # Create hover text for neighbors
+        neighbor_hover_text = []
+        for _, row in neighbor_points.iterrows():
+            text = f"Database: KNN Neighbor (PubChem)<br>"
+            if row['label']:
+                text += f"Name: {row['label']}<br>"
+            if row['formula']:
+                formatted_formula = format_chemical_formula(row['formula'])
+                text += f"Formula: {formatted_formula}"
+            neighbor_hover_text.append(text)
+        
+        fig.add_trace(go.Scatter(
+            x=neighbor_points['x'],
+            y=neighbor_points['y'],
+            mode='markers',
+            marker=dict(
+                color='red',
+                size=10,
+                opacity=0.7
+            ),
+            name='KNN Neighbors',
+            hovertext=neighbor_hover_text,
+            hoverinfo='text',
+            showlegend=True
+        ))
+        
+        # Add connections between GUAPOS points and their neighbors
+        for neighbor in knn_neighbors:
+            x0, y0 = plot_data['points'][neighbor['guapos_index']]
+            x1, y1 = plot_data['points'][neighbor['neighbor_index']]
+            
+            fig.add_trace(go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode='lines',
+                line=dict(color='red', width=1, dash='solid'),
+                opacity=0.6,
+                showlegend=False,
+                hoverinfo='skip'
+            ))
     
     # Add KNN connections if they exist
     if plot_data.get('knn_connections'):
@@ -211,6 +324,28 @@ def create_molecule_info_panel(plot_data, selected_point):
     return info
 
 def main():
+    # Add the header image and title
+    st.image("NGC6523_BVO_2.jpg", use_column_width=True)
+    
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.empty()
+        
+    with col2:
+        st.markdown('<p class="main-title">AI-ITACA | Artificial Intelligence Integral Tool for AstroChemical Analysis</p>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    A remarkable upsurge in the complexity of molecules identified in the interstellar medium (ISM) is currently occurring, with over 80 new species discovered in the last three years. A number of them have been emphasized by prebiotic experiments as vital molecular building blocks of life. Since our Solar System was formed from a molecular cloud in the ISM, it prompts the query as to whether the rich interstellar chemical reservoir could have played a role in the emergence of life. The improved sensitivities of state-of-the-art astronomical facilities, such as the Atacama Large Millimeter/submillimeter Array (ALMA) and the James Webb Space Telescope (JWST), are revolutionizing the discovery of new molecules in space. However, we are still just scraping the tip of the iceberg. We are far from knowing the complete catalogue of molecules that astrochemistry can offer, as well as the complexity they can reach.<br><br>
+    <strong>Artificial Intelligence Integral Tool for AstroChemical Analysis (AI-ITACA)</strong>, proposes to combine complementary machine learning (ML) techniques to address all the challenges that astrochemistry is currently facing. AI-ITACA will significantly contribute to the development of new AI-based cutting-edge analysis software that will allow us to make a crucial leap in the characterization of the level of chemical complexity in the ISM, and in our understanding of the contribution that interstellar chemistry might have in the origin of life.
+    """, unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="info-box">
+    <h4>About GUAPOS</h4>
+    <p>The G31.41+0.31 Unbiased ALMA sPectral Observational Survey (GUAPOS) project targets the hot molecular core (HMC) G31.41+0.31 (G31) to reveal the complex chemistry of one of the most chemically rich high-mass star-forming regions outside the Galactic center (GC).</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
     st.markdown('<h1 class="main-header">🧪 Chemical Space Visualization</h1>', unsafe_allow_html=True)
     
     # Sidebar
@@ -289,14 +424,17 @@ def main():
         
         return
     
+    # Find KNN neighbors
+    knn_neighbors = find_knn_neighbors(plot_data)
+    
     # Create tabs for different views
-    tab1, tab2, tab3 = st.tabs(["📈 Interactive Map", "📊 Statistics", "🔍 Molecule Explorer"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Interactive Map", "📊 Statistics", "🔍 Molecule Explorer", "🧲 KNN Neighbors"])
     
     with tab1:
         st.markdown('<h2 class="sub-header">Interactive Chemical Space Map</h2>', unsafe_allow_html=True)
         
         # Create interactive plot
-        fig = create_interactive_plot(plot_data)
+        fig = create_interactive_plot(plot_data, knn_neighbors)
         
         # Display the plot
         st.plotly_chart(fig, use_container_width=True)
@@ -320,6 +458,7 @@ def main():
             <p>• <strong>Closer points</strong> = More similar molecules<br>
             • <strong>Colors</strong> = Source database<br>
             • <strong>Gray lines</strong> = KNN similarity connections<br>
+            • <strong>Red points/lines</strong> = KNN neighbors from PubChem close to GUAPOS molecules<br>
             • <strong>Larger points</strong> = GUAPOS molecules</p>
             </div>
             """, unsafe_allow_html=True)
@@ -345,6 +484,9 @@ def main():
             
             if plot_data.get('knn_connections'):
                 st.metric("KNN Connections", len(plot_data['knn_connections']))
+            
+            if knn_neighbors:
+                st.metric("KNN Neighbors Found", len(knn_neighbors))
             
             # Show database details
             st.write("**Database Details:**")
@@ -420,6 +562,50 @@ def main():
             file_name="filtered_molecules.csv",
             mime="text/csv"
         )
+    
+    with tab4:
+        st.markdown('<h2 class="sub-header">KNN Neighbors Analysis</h2>', unsafe_allow_html=True)
+        
+        if not knn_neighbors:
+            st.info("No KNN neighbors found. Make sure you have GUAPOS points and PubChem points in your data.")
+        else:
+            st.metric("Total KNN Neighbors Found", len(knn_neighbors))
+            
+            # Create a summary table
+            neighbor_summary = []
+            for neighbor in knn_neighbors:
+                neighbor_summary.append({
+                    'GUAPOS Molecule': neighbor['guapos_label'] or f"Index {neighbor['guapos_index']}",
+                    'GUAPOS Formula': neighbor['guapos_formula'] or 'Unknown',
+                    'Neighbor Molecule': neighbor['neighbor_label'] or f"Index {neighbor['neighbor_index']}",
+                    'Neighbor Formula': neighbor['neighbor_formula'] or 'Unknown',
+                    'Distance': f"{neighbor['distance']:.4f}"
+                })
+            
+            neighbor_df = pd.DataFrame(neighbor_summary)
+            
+            # Group by GUAPOS molecule to show count
+            guapos_counts = neighbor_df['GUAPOS Molecule'].value_counts().reset_index()
+            guapos_counts.columns = ['GUAPOS Molecule', 'Number of Neighbors']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Neighbors per GUAPOS Molecule:**")
+                st.dataframe(guapos_counts, use_container_width=True)
+            
+            with col2:
+                st.write("**All KNN Neighbors:**")
+                st.dataframe(neighbor_df, use_container_width=True)
+            
+            # Download option
+            csv = neighbor_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download KNN Neighbors Data",
+                data=csv,
+                file_name="knn_neighbors.csv",
+                mime="text/csv"
+            )
 
 if __name__ == "__main__":
     main()
