@@ -95,8 +95,9 @@ def find_knn_neighbors(plot_data):
         return []
     
     guapos_points = df_points[guapos_mask][['x', 'y']].values
+    guapos_indices = df_points[guapos_mask]['index'].values
     
-    # Get PubChem points that are not in All_Discoveries or TMC_1
+    # Get PubChem points
     pubchem_mask = (df_points['database'] == 'PubChem')
     if not pubchem_mask.any():
         return []
@@ -107,7 +108,7 @@ def find_knn_neighbors(plot_data):
     if len(guapos_points) == 0 or len(pubchem_points) == 0:
         return []
     
-    # Find 10 nearest neighbors for each GUAPOS point
+    # Find nearest neighbors for each GUAPOS point
     n_neighbors = min(10, len(pubchem_points))
     knn = NearestNeighbors(n_neighbors=n_neighbors)
     knn.fit(pubchem_points)
@@ -119,24 +120,32 @@ def find_knn_neighbors(plot_data):
     unique_neighbors = set()
     neighbor_info = []
     
-    for i, (guapos_idx, guapos_point) in enumerate(zip(df_points[df_points['database'] == 'GUAPOS']['index'].values, guapos_points)):
-        for j, neighbor_idx in enumerate(indices[i]):
-            pubchem_index = pubchem_indices[neighbor_idx]
+    for i, (guapos_idx, guapos_point) in enumerate(zip(guapos_indices, guapos_points)):
+        for j, neighbor_pos in enumerate(indices[i]):
+            pubchem_index = pubchem_indices[neighbor_pos]
             
             # Verificar que el índice sea válido
-            if pubchem_index < len(df_points) and pubchem_index not in unique_neighbors:
+            if (pubchem_index < len(df_points) and 
+                pubchem_index not in unique_neighbors):
+                
                 unique_neighbors.add(pubchem_index)
+                
+                # Obtener información con validación
+                guapos_label = df_points.iloc[guapos_idx]['label'] if guapos_idx < len(df_points) else f"Index {guapos_idx}"
+                neighbor_label = df_points.iloc[pubchem_index]['label'] if pubchem_index < len(df_points) else f"Index {pubchem_index}"
+                guapos_formula = df_points.iloc[guapos_idx]['formula'] if guapos_idx < len(df_points) else "Unknown"
+                neighbor_formula = df_points.iloc[pubchem_index]['formula'] if pubchem_index < len(df_points) else "Unknown"
                 
                 neighbor_info.append({
                     'guapos_index': int(guapos_idx),
                     'neighbor_index': int(pubchem_index),
                     'distance': float(distances[i][j]),
                     'guapos_point': [float(guapos_point[0]), float(guapos_point[1])],
-                    'neighbor_point': [float(pubchem_points[neighbor_idx][0]), float(pubchem_points[neighbor_idx][1])],
-                    'guapos_label': df_points.iloc[guapos_idx]['label'],
-                    'neighbor_label': df_points.iloc[pubchem_index]['label'],
-                    'guapos_formula': df_points.iloc[guapos_idx]['formula'],
-                    'neighbor_formula': df_points.iloc[pubchem_index]['formula']
+                    'neighbor_point': [float(pubchem_points[neighbor_pos][0]), float(pubchem_points[neighbor_pos][1])],
+                    'guapos_label': guapos_label,
+                    'neighbor_label': neighbor_label,
+                    'guapos_formula': guapos_formula,
+                    'neighbor_formula': neighbor_formula
                 })
     
     return neighbor_info
@@ -189,17 +198,23 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
             showlegend=True
         ))
     
-    # Add KNN neighbors from PubChem (red points)
+    # Add KNN neighbors from PubChem (red points) - with validation
     if knn_neighbors:
         # Filtrar índices válidos
-        valid_neighbor_indices = []
+        valid_neighbors = []
         for neighbor in knn_neighbors:
-            neighbor_idx = neighbor['neighbor_index']
-            if neighbor_idx < len(df_points):
-                valid_neighbor_indices.append(neighbor_idx)
+            guapos_idx = neighbor.get('guapos_index')
+            neighbor_idx = neighbor.get('neighbor_index')
+            
+            # Verificar que ambos índices sean válidos
+            if (guapos_idx is not None and neighbor_idx is not None and
+                guapos_idx < len(plot_data['points']) and 
+                neighbor_idx < len(plot_data['points'])):
+                valid_neighbors.append(neighbor)
         
-        if valid_neighbor_indices:
-            neighbor_points = df_points.iloc[valid_neighbor_indices]
+        if valid_neighbors:
+            neighbor_indices = [n['neighbor_index'] for n in valid_neighbors]
+            neighbor_points = df_points.iloc[neighbor_indices]
             
             # Create hover text for neighbors
             neighbor_hover_text = []
@@ -228,40 +243,42 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
             ))
             
             # Add connections between GUAPOS points and their neighbors
-            for neighbor in knn_neighbors:
+            for neighbor in valid_neighbors:
                 guapos_idx = neighbor['guapos_index']
                 neighbor_idx = neighbor['neighbor_index']
                 
-                # Verificar que ambos índices sean válidos
-                if (guapos_idx < len(plot_data['points']) and 
-                    neighbor_idx < len(plot_data['points'])):
-                    
-                    x0, y0 = plot_data['points'][guapos_idx]
-                    x1, y1 = plot_data['points'][neighbor_idx]
-                    
-                    fig.add_trace(go.Scatter(
-                        x=[x0, x1],
-                        y=[y0, y1],
-                        mode='lines',
-                        line=dict(color='red', width=1, dash='solid'),
-                        opacity=0.6,
-                        showlegend=False,
-                        hoverinfo='skip'
-                    ))
+                x0, y0 = plot_data['points'][guapos_idx]
+                x1, y1 = plot_data['points'][neighbor_idx]
+                
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='solid'),
+                    opacity=0.6,
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
     
-    # Add KNN connections if they exist (from precomputed data)
+    # Add KNN connections if they exist (from precomputed data) - with validation
     if plot_data.get('knn_connections'):
         connections = plot_data['knn_connections']
         
-        # Filtrar índices válidos
-        valid_neighbor_indices = []
+        # Filtrar conexiones válidas
+        valid_connections = []
         for conn in connections:
-            neighbor_idx = conn['neighbor_index']
-            if neighbor_idx < len(df_points):
-                valid_neighbor_indices.append(neighbor_idx)
+            guapos_idx = conn.get('guapos_index')
+            neighbor_idx = conn.get('neighbor_index')
+            
+            # Verificar que ambos índices sean válidos
+            if (guapos_idx is not None and neighbor_idx is not None and
+                guapos_idx < len(plot_data['points']) and 
+                neighbor_idx < len(plot_data['points'])):
+                valid_connections.append(conn)
         
-        if valid_neighbor_indices:
-            neighbor_points = df_points.iloc[valid_neighbor_indices]
+        if valid_connections:
+            neighbor_indices = [conn['neighbor_index'] for conn in valid_connections]
+            neighbor_points = df_points.iloc[neighbor_indices]
             
             # Create hover text for neighbors
             neighbor_hover_text = []
@@ -291,26 +308,22 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
             ))
             
             # Add connections between GUAPOS points and their neighbors
-            for connection in connections:
+            for connection in valid_connections:
                 guapos_idx = connection['guapos_index']
                 neighbor_idx = connection['neighbor_index']
                 
-                # Verificar que ambos índices sean válidos
-                if (guapos_idx < len(plot_data['points']) and 
-                    neighbor_idx < len(plot_data['points'])):
-                    
-                    x0, y0 = plot_data['points'][guapos_idx]
-                    x1, y1 = plot_data['points'][neighbor_idx]
-                    
-                    fig.add_trace(go.Scatter(
-                        x=[x0, x1],
-                        y=[y0, y1],
-                        mode='lines',
-                        line=dict(color='red', width=1, dash='solid'),
-                        opacity=0.6,
-                        showlegend=False,
-                        hoverinfo='skip'
-                    ))
+                x0, y0 = plot_data['points'][guapos_idx]
+                x1, y1 = plot_data['points'][neighbor_idx]
+                
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='solid'),
+                    opacity=0.6,
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
     
     # Update layout
     fig.update_layout(
@@ -639,48 +652,59 @@ def main():
         else:
             st.metric("Total KNN Neighbors Found", len(knn_data))
             
-            # Create a summary table
+            # Create a summary table with validation
             neighbor_summary = []
             for neighbor in knn_data:
                 # Handle both formats (precomputed and real-time)
-                if 'guapos_index' in neighbor:
-                    guapos_idx = neighbor['guapos_index']
-                    neighbor_idx = neighbor['neighbor_index']
+                guapos_idx = neighbor.get('guapos_index')
+                neighbor_idx = neighbor.get('neighbor_index')
+                
+                # Validar índices antes de acceder
+                if (guapos_idx is not None and neighbor_idx is not None and
+                    guapos_idx < len(plot_data['labels']) and 
+                    neighbor_idx < len(plot_data['labels'])):
+                    
+                    guapos_name = plot_data['labels'][guapos_idx] or f"Index {guapos_idx}"
+                    neighbor_name = plot_data['labels'][neighbor_idx] or f"Index {neighbor_idx}"
+                    guapos_formula = plot_data['formulas'][guapos_idx] if guapos_idx < len(plot_data['formulas']) else 'Unknown'
+                    neighbor_formula = plot_data['formulas'][neighbor_idx] if neighbor_idx < len(plot_data['formulas']) else 'Unknown'
                     distance = neighbor.get('distance', 'N/A')
                     
                     neighbor_summary.append({
-                        'GUAPOS Molecule': plot_data['labels'][guapos_idx] or f"Index {guapos_idx}",
-                        'GUAPOS Formula': plot_data['formulas'][guapos_idx] or 'Unknown',
-                        'Neighbor Molecule': plot_data['labels'][neighbor_idx] or f"Index {neighbor_idx}",
-                        'Neighbor Formula': plot_data['formulas'][neighbor_idx] or 'Unknown',
+                        'GUAPOS Molecule': guapos_name,
+                        'GUAPOS Formula': guapos_formula,
+                        'Neighbor Molecule': neighbor_name,
+                        'Neighbor Formula': neighbor_formula,
                         'Distance': f"{distance:.4f}" if isinstance(distance, (int, float)) else distance
                     })
             
-            neighbor_df = pd.DataFrame(neighbor_summary)
-            
-            # Group by GUAPOS molecule to show count
-            guapos_counts = neighbor_df['GUAPOS Molecule'].value_counts().reset_index()
-            guapos_counts.columns = ['GUAPOS Molecule', 'Number of Neighbors']
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Neighbors per GUAPOS Molecule:**")
-                st.dataframe(guapos_counts, use_container_width=True)
-            
-            with col2:
-                st.write("**All KNN Neighbors:**")
-                st.dataframe(neighbor_df, use_container_width=True)
-            
-            # Download option
-            csv = neighbor_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download KNN Neighbors Data",
-                data=csv,
-                file_name="knn_neighbors.csv",
-                mime="text/csv"
-            )
+            if neighbor_summary:
+                neighbor_df = pd.DataFrame(neighbor_summary)
+                
+                # Group by GUAPOS molecule to show count
+                guapos_counts = neighbor_df['GUAPOS Molecule'].value_counts().reset_index()
+                guapos_counts.columns = ['GUAPOS Molecule', 'Number of Neighbors']
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Neighbors per GUAPOS Molecule:**")
+                    st.dataframe(guapos_counts, use_container_width=True)
+                
+                with col2:
+                    st.write("**All KNN Neighbors:**")
+                    st.dataframe(neighbor_df, use_container_width=True)
+                
+                # Download option
+                csv = neighbor_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download KNN Neighbors Data",
+                    data=csv,
+                    file_name="knn_neighbors.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("No valid KNN neighbors found after validation.")
 
 if __name__ == "__main__":
     main()
-
