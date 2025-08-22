@@ -89,13 +89,18 @@ def find_knn_neighbors(plot_data):
         'index': range(len(plot_data['points']))
     })
     
-    # Get GUAPOS points
-    guapos_points = df_points[df_points['database'] == 'GUAPOS'][['x', 'y']].values
+    # Get GUAPOS points (verificar que existan)
+    guapos_mask = df_points['database'] == 'GUAPOS'
+    if not guapos_mask.any():
+        return []
+    
+    guapos_points = df_points[guapos_mask][['x', 'y']].values
     
     # Get PubChem points that are not in All_Discoveries or TMC_1
-    pubchem_mask = (df_points['database'] == 'PubChem') & \
-                  (~df_points['label'].isin(df_points[df_points['database'] == 'All_Discoveries']['label'])) & \
-                  (~df_points['label'].isin(df_points[df_points['database'] == 'TMC_1']['label']))
+    pubchem_mask = (df_points['database'] == 'PubChem')
+    if not pubchem_mask.any():
+        return []
+    
     pubchem_points = df_points[pubchem_mask][['x', 'y']].values
     pubchem_indices = df_points[pubchem_mask]['index'].values
     
@@ -118,7 +123,8 @@ def find_knn_neighbors(plot_data):
         for j, neighbor_idx in enumerate(indices[i]):
             pubchem_index = pubchem_indices[neighbor_idx]
             
-            if pubchem_index not in unique_neighbors:
+            # Verificar que el índice sea válido
+            if pubchem_index < len(df_points) and pubchem_index not in unique_neighbors:
                 unique_neighbors.add(pubchem_index)
                 
                 neighbor_info.append({
@@ -185,105 +191,126 @@ def create_interactive_plot(plot_data, knn_neighbors=None):
     
     # Add KNN neighbors from PubChem (red points)
     if knn_neighbors:
-        neighbor_indices = [neighbor['neighbor_index'] for neighbor in knn_neighbors]
-        neighbor_points = df_points.iloc[neighbor_indices]
-        
-        # Create hover text for neighbors
-        neighbor_hover_text = []
-        for _, row in neighbor_points.iterrows():
-            text = f"Database: KNN Neighbor (PubChem)<br>"
-            if row['label']:
-                text += f"Name: {row['label']}<br>"
-            if row['formula']:
-                formatted_formula = format_chemical_formula(row['formula'])
-                text += f"Formula: {formatted_formula}"
-            neighbor_hover_text.append(text)
-        
-        fig.add_trace(go.Scatter(
-            x=neighbor_points['x'],
-            y=neighbor_points['y'],
-            mode='markers',
-            marker=dict(
-                color='red',
-                size=10,
-                opacity=0.7
-            ),
-            name='KNN Neighbors',
-            hovertext=neighbor_hover_text,
-            hoverinfo='text',
-            showlegend=True
-        ))
-        
-        # Add connections between GUAPOS points and their neighbors
+        # Filtrar índices válidos
+        valid_neighbor_indices = []
         for neighbor in knn_neighbors:
-            x0, y0 = plot_data['points'][neighbor['guapos_index']]
-            x1, y1 = plot_data['points'][neighbor['neighbor_index']]
+            neighbor_idx = neighbor['neighbor_index']
+            if neighbor_idx < len(df_points):
+                valid_neighbor_indices.append(neighbor_idx)
+        
+        if valid_neighbor_indices:
+            neighbor_points = df_points.iloc[valid_neighbor_indices]
+            
+            # Create hover text for neighbors
+            neighbor_hover_text = []
+            for _, row in neighbor_points.iterrows():
+                text = f"Database: KNN Neighbor (PubChem)<br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                neighbor_hover_text.append(text)
             
             fig.add_trace(go.Scatter(
-                x=[x0, x1],
-                y=[y0, y1],
-                mode='lines',
-                line=dict(color='red', width=1, dash='solid'),
-                opacity=0.6,
-                showlegend=False,
-                hoverinfo='skip'
+                x=neighbor_points['x'],
+                y=neighbor_points['y'],
+                mode='markers',
+                marker=dict(
+                    color='red',
+                    size=10,
+                    opacity=0.7
+                ),
+                name='KNN Neighbors',
+                hovertext=neighbor_hover_text,
+                hoverinfo='text',
+                showlegend=True
             ))
+            
+            # Add connections between GUAPOS points and their neighbors
+            for neighbor in knn_neighbors:
+                guapos_idx = neighbor['guapos_index']
+                neighbor_idx = neighbor['neighbor_index']
+                
+                # Verificar que ambos índices sean válidos
+                if (guapos_idx < len(plot_data['points']) and 
+                    neighbor_idx < len(plot_data['points'])):
+                    
+                    x0, y0 = plot_data['points'][guapos_idx]
+                    x1, y1 = plot_data['points'][neighbor_idx]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=[x0, x1],
+                        y=[y0, y1],
+                        mode='lines',
+                        line=dict(color='red', width=1, dash='solid'),
+                        opacity=0.6,
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
     
     # Add KNN connections if they exist (from precomputed data)
     if plot_data.get('knn_connections'):
         connections = plot_data['knn_connections']
         
-        # Get neighbor indices to mark them as red
-        neighbor_indices = [conn['neighbor_index'] for conn in connections]
-        neighbor_points = df_points.iloc[neighbor_indices]
+        # Filtrar índices válidos
+        valid_neighbor_indices = []
+        for conn in connections:
+            neighbor_idx = conn['neighbor_index']
+            if neighbor_idx < len(df_points):
+                valid_neighbor_indices.append(neighbor_idx)
         
-        # Create hover text for neighbors
-        neighbor_hover_text = []
-        for _, row in neighbor_points.iterrows():
-            text = f"Database: KNN Neighbor (PubChem)<br>"
-            if row['label']:
-                text += f"Name: {row['label']}<br>"
-            if row['formula']:
-                formatted_formula = format_chemical_formula(row['formula'])
-                text += f"Formula: {formatted_formula}"
-            neighbor_hover_text.append(text)
-        
-        # Add red points for KNN neighbors
-        fig.add_trace(go.Scatter(
-            x=neighbor_points['x'],
-            y=neighbor_points['y'],
-            mode='markers',
-            marker=dict(
-                color='red',
-                size=10,
-                opacity=0.7
-            ),
-            name='KNN Neighbors',
-            hovertext=neighbor_hover_text,
-            hoverinfo='text',
-            showlegend=True
-        ))
-        
-        # Add connections between GUAPOS points and their neighbors
-        for connection in connections:
-            guapos_idx = connection['guapos_index']
-            neighbor_idx = connection['neighbor_index']
+        if valid_neighbor_indices:
+            neighbor_points = df_points.iloc[valid_neighbor_indices]
             
-            if (guapos_idx < len(plot_data['points']) and 
-                neighbor_idx < len(plot_data['points'])):
+            # Create hover text for neighbors
+            neighbor_hover_text = []
+            for _, row in neighbor_points.iterrows():
+                text = f"Database: KNN Neighbor<br>"
+                if row['label']:
+                    text += f"Name: {row['label']}<br>"
+                if row['formula']:
+                    formatted_formula = format_chemical_formula(row['formula'])
+                    text += f"Formula: {formatted_formula}"
+                neighbor_hover_text.append(text)
+            
+            # Add red points for KNN neighbors
+            fig.add_trace(go.Scatter(
+                x=neighbor_points['x'],
+                y=neighbor_points['y'],
+                mode='markers',
+                marker=dict(
+                    color='red',
+                    size=10,
+                    opacity=0.7
+                ),
+                name='KNN Neighbors',
+                hovertext=neighbor_hover_text,
+                hoverinfo='text',
+                showlegend=True
+            ))
+            
+            # Add connections between GUAPOS points and their neighbors
+            for connection in connections:
+                guapos_idx = connection['guapos_index']
+                neighbor_idx = connection['neighbor_index']
                 
-                x0, y0 = plot_data['points'][guapos_idx]
-                x1, y1 = plot_data['points'][neighbor_idx]
-                
-                fig.add_trace(go.Scatter(
-                    x=[x0, x1],
-                    y=[y0, y1],
-                    mode='lines',
-                    line=dict(color='red', width=1, dash='solid'),
-                    opacity=0.6,
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
+                # Verificar que ambos índices sean válidos
+                if (guapos_idx < len(plot_data['points']) and 
+                    neighbor_idx < len(plot_data['points'])):
+                    
+                    x0, y0 = plot_data['points'][guapos_idx]
+                    x1, y1 = plot_data['points'][neighbor_idx]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=[x0, x1],
+                        y=[y0, y1],
+                        mode='lines',
+                        line=dict(color='red', width=1, dash='solid'),
+                        opacity=0.6,
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
     
     # Update layout
     fig.update_layout(
@@ -656,3 +683,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
