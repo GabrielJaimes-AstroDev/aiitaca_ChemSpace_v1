@@ -11,7 +11,7 @@ from sklearn.neighbors import NearestNeighbors
 # Page configuration
 st.set_page_config(
     page_title="A.Chemical Space Visualization",
-    page_icon="🧪",
+    page_icon="🔭",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -708,5 +708,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
